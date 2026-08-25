@@ -4,15 +4,48 @@ import json
 import math
 import glob
 import os
-import flexpolyline
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import shape, Point
 
 # ---------------------------------------------------------
-# 設定
+# パスワード認証処理
 # ---------------------------------------------------------
-# 💡 ご自身の HERE API Key を設定してください
+def check_password():
+    """SecretsにPASSWORDが設定されている場合のみ認証を行う"""
+    if "PASSWORD" not in st.secrets:
+        return True
+
+    def password_entered():
+        if st.session_state["password_input"] == st.secrets["PASSWORD"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password_input"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct", False):
+        return True
+
+    st.title("🔒 ログインが必要です")
+    st.text_input(
+        "パスワードを入力してください",
+        type="password",
+        on_change=password_entered,
+        key="password_input"
+    )
+
+    if "password_correct" in st.session_state and not st.session_state["password_correct"]:
+        st.error("パスワードが違います。")
+
+    return False
+
+if not check_password():
+    st.stop()
+
+# ---------------------------------------------------------
+# API Key & 定数設定
+# ---------------------------------------------------------
+GOOGLE_MAPS_API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "YOUR_GOOGLE_API_KEY")
 HERE_API_KEY = st.secrets.get("HERE_API_KEY", "YOUR_HERE_API_KEY")
 
 PICKUP_FEE = 300      # 迎車料金 (1乗車につき固定)
@@ -25,22 +58,22 @@ if "start_point_val" not in st.session_state:
     st.session_state["start_point_val"] = ""
 if "end_point_val" not in st.session_state:
     st.session_state["end_point_val"] = ""
-if "via_point_val" not in st.session_state:
-    st.session_state["via_point_val"] = ""
 
-# ピンの座標保持用
+# 経由地の動的リスト (最大3件)
+# 各要素: {"address": "", "reset_meter": True, "coords": None}
+if "via_list" not in st.session_state:
+    st.session_state["via_list"] = []
+
 if "start_coords" not in st.session_state:
     st.session_state["start_coords"] = None
 if "end_coords" not in st.session_state:
     st.session_state["end_coords"] = None
-if "via_coords" not in st.session_state:
-    st.session_state["via_coords"] = None
 
 if "last_processed_click" not in st.session_state:
     st.session_state["last_processed_click"] = None
 
 # ---------------------------------------------------------
-# 複数GeoJSONファイル（area_*.geojson）の読み込み & エリア判定
+# GeoJSON読み込み & エリア判定
 # ---------------------------------------------------------
 @st.cache_data
 def load_all_area_geojsons():
@@ -85,110 +118,107 @@ def find_area(lat, lon):
     return None
 
 # ---------------------------------------------------------
-# HERE API 連携関数
+# Google Maps API 関数
 # ---------------------------------------------------------
-def get_coordinates_here(address):
-    url = "https://geocode.search.hereapi.com/v1/geocode"
-    params = {
-        "q": address,
-        "apiKey": HERE_API_KEY,
-        "lang": "ja"
-    }
+def get_coordinates_google(address):
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {"address": address, "key": GOOGLE_MAPS_API_KEY, "language": "ja"}
     try:
-        response = requests.get(url, params=params)
-        data = response.json()
-        if "items" in data and len(data["items"]) > 0:
-            position = data["items"][0]["position"]
-            return position["lat"], position["lng"]
-        else:
-            st.error(f"住所の検索に失敗しました ({address})")
-            return None, None
+        res = requests.get(url, params=params).json()
+        if res.get("status") == "OK" and len(res["results"]) > 0:
+            loc = res["results"][0]["geometry"]["location"]
+            return loc["lat"], loc["lng"]
+        st.error(f"Google ジオコーディング検索失敗 ({address})")
+        return None, None
     except Exception as e:
-        st.error(f"HERE Geocoding API 通信エラー: {e}")
+        st.error(f"Google Geocoding API エラー: {e}")
         return None, None
 
-
-def reverse_geocode_here(lat, lon):
-    url = "https://revgeocode.search.hereapi.com/v1/revgeocode"
-    params = {
-        "at": f"{lat},{lon}",
-        "apiKey": HERE_API_KEY,
-        "lang": "ja"
-    }
+def reverse_geocode_google(lat, lon):
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {"latlng": f"{lat},{lon}", "key": GOOGLE_MAPS_API_KEY, "language": "ja"}
     try:
-        response = requests.get(url, params=params)
-        data = response.json()
-        if "items" in data and len(data["items"]) > 0:
-            return data["items"][0]["address"]["label"]
+        res = requests.get(url, params=params).json()
+        if res.get("status") == "OK" and len(res["results"]) > 0:
+            return res["results"][0]["formatted_address"]
         return f"{lat:.5f}, {lon:.5f}"
     except Exception:
         return f"{lat:.5f}, {lon:.5f}"
 
+def get_google_route(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=False):
+    url = "https://maps.googleapis.com/maps/api/directions/json"
+    params = {
+        "origin": f"{origin_lat},{origin_lon}",
+        "destination": f"{dest_lat},{dest_lon}",
+        "mode": "driving",
+        "key": GOOGLE_MAPS_API_KEY,
+        "language": "ja"
+    }
+    if avoid_highways:
+        params["avoid"] = "tolls"
 
-def get_here_route(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=False):
+    try:
+        res = requests.get(url, params=params).json()
+        if res.get("status") != "OK" or not res.get("routes"):
+            st.error("Google Directions API でルートが見つかりませんでした。")
+            return None
+
+        route = res["routes"][0]
+        leg = route["legs"][0]
+        distance_km = leg["distance"]["value"] / 1000.0
+
+        import googlepolyline
+        path_coords = googlepolyline.decode(route["overview_polyline"]["points"])
+
+        return {
+            "distance_km": distance_km,
+            "path_coords": path_coords
+        }
+    except Exception as e:
+        st.error(f"Google Directions API 通信エラー: {e}")
+        return None
+
+# ---------------------------------------------------------
+# HERE API 関数（高速料金取得）
+# ---------------------------------------------------------
+def get_here_toll_fee(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=False):
+    if avoid_highways:
+        return 0
+
     url = "https://router.hereapi.com/v8/routes"
     params = {
         "transportMode": "car",
         "origin": f"{origin_lat},{origin_lon}",
         "destination": f"{dest_lat},{dest_lon}",
-        "return": "summary,polyline,tolls",
+        "return": "tolls",
         "tolls[transponders]": "all",
         "apiKey": HERE_API_KEY,
         "lang": "ja"
     }
-    
-    if avoid_highways:
-        params["avoid[features]"] = "tollRoad"
 
     try:
-        response = requests.get(url, params=params)
-        data = response.json()
+        res = requests.get(url, params=params).json()
+        if "routes" not in res or len(res["routes"]) == 0:
+            return 0
 
-        if "routes" not in data or len(data["routes"]) == 0:
-            st.error("HERE Routing API でルートが見つかりませんでした。")
-            return None
-
-        route = data["routes"][0]
-        sections = route.get("sections", [])
-        
-        total_distance_m = 0
+        sections = res["routes"][0].get("sections", [])
         total_toll_cost = 0
-        all_coords = []
-
         for section in sections:
-            summary = section.get("summary", {})
-            total_distance_m += summary.get("length", 0)
-
             if "tolls" in section:
                 for toll in section["tolls"]:
-                    fares = toll.get("fares", [])
-                    for fare in fares:
-                        price_obj = fare.get("price", {})
-                        price_val = price_obj.get("value", 0)
+                    for fare in toll.get("fares", []):
+                        price_val = fare.get("price", {}).get("value", 0)
                         if price_val > 0:
                             total_toll_cost += int(price_val)
-
-            if "polyline" in section:
-                decoded_tuples = flexpolyline.decode(section["polyline"])
-                coords = [(pt[0], pt[1]) for pt in decoded_tuples]
-                all_coords.extend(coords)
-
-        distance_km = total_distance_m / 1000.0
-
-        return {
-            "distance_km": distance_km,
-            "toll_fee": total_toll_cost,
-            "path_coords": all_coords
-        }
-    except Exception as e:
-        st.error(f"HERE Routing API 通信エラー: {e}")
-        return None
+        return total_toll_cost
+    except Exception:
+        return 0
 
 # ---------------------------------------------------------
 # タクシー料金計算ロジック
 # ---------------------------------------------------------
 def calculate_segment_fare(distance_km, rule, is_night):
-    if distance_km is None:
+    if distance_km is None or distance_km == 0:
         return 0
 
     distance_m = distance_km * 1000.0
@@ -212,13 +242,10 @@ def calculate_segment_fare(distance_km, rule, is_night):
             else:
                 discounted_extra_fare += (add_fare * 0.7)
                 
-        if current_fare < 5000:
-            raw_fare = current_fare
-        else:
-            raw_fare = 5000 + discounted_extra_fare
+        raw_fare = current_fare if current_fare < 5000 else 5000 + discounted_extra_fare
 
     if is_night:
-        raw_fare = raw_fare * 1.2
+        raw_fare *= 1.2
 
     total_segment_fare = raw_fare + PICKUP_FEE
     return int(math.ceil(total_segment_fare / 10) * 10)
@@ -233,7 +260,7 @@ def draw_map(points_markers=None, all_path_coords=None):
         center = [avg_lat, avg_lon]
         zoom = 11
     else:
-        center = [34.7024, 135.4959]  # 大阪駅周辺を中心に表示
+        center = [34.7024, 135.4959]  # 大阪駅周辺
         zoom = 11
 
     m = folium.Map(location=center, zoom_start=zoom, tiles=None)
@@ -280,7 +307,7 @@ def draw_map(points_markers=None, all_path_coords=None):
 # ---------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------
-st.title("🚖 タクシー料金計算アプリ (HERE API 関西対応版)")
+st.title("🚖 タクシー料金計算アプリ")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -291,19 +318,43 @@ with col2:
     end_point = st.text_input("終点（目的地）", value=st.session_state["end_point_val"])
     st.session_state["end_point_val"] = end_point
 
-use_via = st.checkbox("経由地を追加する", value=False)
-via_point = ""
-reset_meter = False
+# ---------------------------------------------------------
+# 経由地フォームエリア（最大3件）
+# ---------------------------------------------------------
+st.markdown("### 経由地設定（最大3件）")
 
-if use_via:
+# 経由地の追加・削除ボタン
+col_b1, col_b2, _ = st.columns([1, 1, 2])
+with col_b1:
+    if len(st.session_state["via_list"]) < 3:
+        if st.button("➕ 経由地を追加する"):
+            st.session_state["via_list"].append({"address": "", "reset_meter": True, "coords": None})
+            st.rerun()
+with col_b2:
+    if len(st.session_state["via_list"]) > 0:
+        if st.button("🗑️ 経由地を減らす"):
+            st.session_state["via_list"].pop()
+            st.rerun()
+
+# 各経由地の入力フォーム表示
+for idx, via_item in enumerate(st.session_state["via_list"]):
     col_v1, col_v2 = st.columns([2, 1])
     with col_v1:
-        via_point = st.text_input("経由地名", value=st.session_state["via_point_val"])
-        st.session_state["via_point_val"] = via_point
+        v_address = st.text_input(
+            f"経由地 {idx + 1} の場所",
+            value=via_item["address"],
+            key=f"via_address_{idx}"
+        )
+        st.session_state["via_list"][idx]["address"] = v_address
     with col_v2:
         st.write("")
         st.write("")
-        reset_meter = st.checkbox("経由地でメーター切り直し", value=True)
+        v_reset = st.checkbox(
+            f"経由地 {idx + 1} でメーター切り直し",
+            value=via_item["reset_meter"],
+            key=f"via_reset_{idx}"
+        )
+        st.session_state["via_list"][idx]["reset_meter"] = v_reset
 
 st.markdown("### 料金オプション設定")
 col_opt1, col_opt2, col_opt3 = st.columns(3)
@@ -321,7 +372,7 @@ if use_highway:
         default_toll = st.session_state["calc_result"].get("total_toll_fee", 0)
         
     manual_toll_fee = st.number_input(
-        "高速・有料道路料金（円） ※自動取得できない区間の修正・直接入力用",
+        "高速・有料道路料金（円） ※手動修正・直接入力用",
         min_value=0,
         value=default_toll,
         step=100
@@ -333,21 +384,22 @@ if use_highway:
 st.markdown("---")
 st.markdown("### 🗺️ マップ (クリックして地点を設定)")
 
-click_target_options = ["始点に設定", "終点に設定"]
-if use_via:
-    click_target_options.insert(1, "経由地に設定")
+click_target_options = ["始点に設定"]
+for idx in range(len(st.session_state["via_list"])):
+    click_target_options.append(f"経由地{idx + 1}に設定")
+click_target_options.append("終点に設定")
 
 click_target = st.radio("👇 地図上でクリックした位置の割り当て先を選択してください:", click_target_options, horizontal=True)
 
-# マーカー描画用リスト
 current_markers = []
 if st.session_state["start_coords"]:
     lat, lon = st.session_state["start_coords"]
     current_markers.append((lat, lon, f"始点: {st.session_state['start_point_val']}", "green"))
 
-if use_via and st.session_state["via_coords"]:
-    lat, lon = st.session_state["via_coords"]
-    current_markers.append((lat, lon, f"経由地: {st.session_state['via_point_val']}", "orange"))
+for idx, via_item in enumerate(st.session_state["via_list"]):
+    if via_item.get("coords"):
+        lat, lon = via_item["coords"]
+        current_markers.append((lat, lon, f"経由地{idx + 1}: {via_item['address']}", "orange"))
 
 if st.session_state["end_coords"]:
     lat, lon = st.session_state["end_coords"]
@@ -358,13 +410,7 @@ if "calc_result" in st.session_state and not st.session_state["calc_result"].get
     prev_paths = st.session_state["calc_result"].get("all_path_coords")
 
 map_obj = draw_map(current_markers, prev_paths)
-
-map_data = st_folium(
-    map_obj,
-    width=700,
-    height=450,
-    key="map_component"
-)
+map_data = st_folium(map_obj, width=700, height=450, key="map_component")
 
 # 地図クリック判定
 clicked_point = None
@@ -384,19 +430,21 @@ if clicked_point:
     if st.session_state["last_processed_click"] != current_click_key:
         st.session_state["last_processed_click"] = current_click_key
 
-        if HERE_API_KEY and HERE_API_KEY != "YOUR_HERE_API_KEY":
-            with st.spinner("クリック地点の住所を取得中..."):
-                address = reverse_geocode_here(clicked_lat, clicked_lng)
+        if GOOGLE_MAPS_API_KEY and GOOGLE_MAPS_API_KEY != "YOUR_GOOGLE_API_KEY":
+            with st.spinner("Google Maps から住所を取得中..."):
+                address = reverse_geocode_google(clicked_lat, clicked_lng)
                 
                 if click_target == "始点に設定":
                     st.session_state["start_point_val"] = address
                     st.session_state["start_coords"] = (clicked_lat, clicked_lng)
-                elif click_target == "経由地に設定":
-                    st.session_state["via_point_val"] = address
-                    st.session_state["via_coords"] = (clicked_lat, clicked_lng)
                 elif click_target == "終点に設定":
                     st.session_state["end_point_val"] = address
                     st.session_state["end_coords"] = (clicked_lat, clicked_lng)
+                else:
+                    for idx in range(len(st.session_state["via_list"])):
+                        if click_target == f"経由地{idx + 1}に設定":
+                            st.session_state["via_list"][idx]["address"] = address
+                            st.session_state["via_list"][idx]["coords"] = (clicked_lat, clicked_lng)
                 
                 st.rerun()
 
@@ -405,154 +453,160 @@ if clicked_point:
 # ---------------------------------------------------------
 st.markdown("---")
 if st.button("料金とルートを計算する", type="primary"):
-    if HERE_API_KEY == "YOUR_HERE_API_KEY" or not HERE_API_KEY:
-        st.error("コード先頭の `HERE_API_KEY` にご自身の HERE API Key を設定してください。")
+    if GOOGLE_MAPS_API_KEY == "YOUR_GOOGLE_API_KEY" or not GOOGLE_MAPS_API_KEY:
+        st.error("Secrets またはコード内に Google Maps API Key を設定してください。")
     elif not start_point or not end_point:
         st.warning("始点と終点を入力してください。")
-    elif use_via and not via_point:
-        st.warning("経由地名を入力してください。")
+    elif any(not v["address"] for v in st.session_state["via_list"]):
+        st.warning("入力されていない経由地があります。住所を入力するか「経由地を減らす」を押してください。")
     else:
-        with st.spinner("HERE API から道路ルートと高速料金を計算中..."):
+        with st.spinner("Google Routes と HERE 高速料金を計算中..."):
             avoid_highways = not use_highway
             
-            start_lat, start_lon = get_coordinates_here(start_point)
-            end_lat, end_lon = get_coordinates_here(end_point)
-            via_lat, via_lon = (None, None)
-            if use_via:
-                via_lat, via_lon = get_coordinates_here(via_point)
+            # 地点リストの作成（始点 ➔ 経由地1 ➔ 経由地2... ➔ 終点）
+            points = []
+            
+            # 始点
+            s_lat, s_lon = get_coordinates_google(start_point)
+            if s_lat is None:
+                st.error("始点の位置情報が取得できませんでした。")
+                st.stop()
+            st.session_state["start_coords"] = (s_lat, s_lon)
+            points.append({"name": start_point, "lat": s_lat, "lon": s_lon, "reset_after": True, "type": "start"})
 
-            if start_lat is None or end_lat is None or (use_via and via_lat is None):
-                st.error("指定された位置情報の取得に失敗しました。")
-            else:
-                st.session_state["start_coords"] = (start_lat, start_lon)
-                st.session_state["end_coords"] = (end_lat, end_lon)
-                if use_via:
-                    st.session_state["via_coords"] = (via_lat, via_lon)
+            # 経由地
+            via_error = False
+            for idx, via_item in enumerate(st.session_state["via_list"]):
+                v_lat, v_lon = get_coordinates_google(via_item["address"])
+                if v_lat is None:
+                    st.error(f"経由地 {idx + 1} の位置情報が取得できませんでした。")
+                    via_error = True
+                    break
+                st.session_state["via_list"][idx]["coords"] = (v_lat, v_lon)
+                points.append({
+                    "name": via_item["address"],
+                    "lat": v_lat,
+                    "lon": v_lon,
+                    "reset_after": via_item["reset_meter"],
+                    "type": "via"
+                })
 
-                start_area = find_area(start_lat, start_lon)
-                end_area = find_area(end_lat, end_lon)
-                via_area = find_area(via_lat, via_lon) if use_via else None
+            if via_error:
+                st.stop()
 
-                all_path_coords = []
-                total_distance = 0.0
-                api_toll_fee = 0
-                taxi_fare = 0
-                error_flag = False
-                error_message = ""
-                info_messages = []
-                caption_messages = []
+            # 終点
+            e_lat, e_lon = get_coordinates_google(end_point)
+            if e_lat is None:
+                st.error("終点の位置情報が取得できませんでした。")
+                st.stop()
+            st.session_state["end_coords"] = (e_lat, e_lon)
+            points.append({"name": end_point, "lat": e_lat, "lon": e_lon, "reset_after": False, "type": "end"})
 
-                # デフォルトルール（GeoJSON定義が無い場合）
-                default_rule = {"name": "標準運賃エリア", "base_fare": 500, "base_distance_m": 1000, "add_fare": 100, "add_distance_m": 250}
+            # エリア情報の取得
+            for pt in points:
+                pt["area"] = find_area(pt["lat"], pt["lon"])
 
-                # -------------------------------------------------
-                # 経由地なし
-                # -------------------------------------------------
-                if not use_via:
-                    applied_rule = start_area if start_area else end_area
-                    if applied_rule is None and ALL_FEATURES:
+            default_rule = {"name": "標準運賃エリア", "base_fare": 500, "base_distance_m": 1000, "add_fare": 100, "add_distance_m": 250}
+
+            # メーター区間ごとにルート・距離・料金を統合計算
+            # reset_after=True ごとに「1つのメーター区間」としてまとめる
+            meter_segments = []
+            current_segment_pts = [points[0]]
+
+            for i in range(1, len(points)):
+                current_segment_pts.append(points[i])
+                # 前の地点でメーターを切る設定、または最終地点に達した場合に区間確定
+                if points[i - 1]["reset_after"] or i == len(points) - 1:
+                    meter_segments.append(current_segment_pts)
+                    current_segment_pts = [points[i]]
+
+            all_path_coords = []
+            total_distance = 0.0
+            api_toll_fee = 0
+            taxi_fare = 0
+            error_flag = False
+            error_message = ""
+            info_messages = []
+            caption_messages = []
+
+            for seg_idx, seg_pts in enumerate(meter_segments):
+                seg_start = seg_pts[0]
+                seg_end = seg_pts[-1]
+                
+                # エリアチェック（始点または終点のどちらかがエリア内である必要あり）
+                applied_rule = seg_start["area"] if seg_start["area"] else seg_end["area"]
+                if applied_rule is None and ALL_FEATURES:
+                    error_flag = True
+                    error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) の発着地が共に営業エリア外です。"
+                    break
+                
+                if applied_rule is None:
+                    applied_rule = default_rule
+
+                # 区間内の連続する2点間ごとのルート・走行距離・高速料金を取得
+                seg_dist = 0.0
+                seg_tolls = 0
+                for k in range(len(seg_pts) - 1):
+                    p1 = seg_pts[k]
+                    p2 = seg_pts[k + 1]
+
+                    route_info = get_google_route(p1["lat"], p1["lon"], p2["lat"], p2["lon"], avoid_highways)
+                    if route_info is None:
                         error_flag = True
-                        error_message = "始点・終点のどちらも対象の営業エリア外です。"
-                    else:
-                        if applied_rule is None:
-                            applied_rule = default_rule
-                        
-                        info_messages.append(f"適用運賃エリア: **{applied_rule['name']}**")
-                        route_info = get_here_route(start_lat, start_lon, end_lat, end_lon, avoid_highways)
-                        
-                        if route_info is None:
-                            error_flag = True
-                        else:
-                            total_distance = route_info["distance_km"]
-                            api_toll_fee = route_info["toll_fee"]
-                            all_path_coords.append(route_info["path_coords"])
-                            taxi_fare = calculate_segment_fare(total_distance, applied_rule, is_night)
+                        break
 
-                # -------------------------------------------------
-                # 経由地あり
-                # -------------------------------------------------
-                else:
-                    route1 = get_here_route(start_lat, start_lon, via_lat, via_lon, avoid_highways)
-                    route2 = get_here_route(via_lat, via_lon, end_lat, end_lon, avoid_highways)
+                    seg_dist += route_info["distance_km"]
+                    all_path_coords.append(route_info["path_coords"])
 
-                    if route1 is None or route2 is None:
-                        error_flag = True
-                    else:
-                        dist1, dist2 = route1["distance_km"], route2["distance_km"]
-                        total_distance = dist1 + dist2
-                        api_toll_fee = route1["toll_fee"] + route2["toll_fee"]
+                    toll = get_here_toll_fee(p1["lat"], p1["lon"], p2["lat"], p2["lon"], avoid_highways)
+                    seg_tolls += toll
 
-                        # A. 経由地でメーター切る場合（2区間独立）
-                        if reset_meter:
-                            rule1 = start_area if start_area else via_area
-                            rule2 = via_area if via_area else end_area
-
-                            # 各区間で発着どちらもエリア外（ALL_FEATURES定義あり時）ならエラー
-                            if ALL_FEATURES and (rule1 is None or rule2 is None):
-                                error_flag = True
-                                error_message = "経由地を含む区間の発着地が営業エリア外です。"
-                            else:
-                                if rule1 is None: rule1 = default_rule
-                                if rule2 is None: rule2 = default_rule
-
-                                fare1 = calculate_segment_fare(dist1, rule1, is_night)
-                                fare2 = calculate_segment_fare(dist2, rule2, is_night)
-                                taxi_fare = fare1 + fare2
-
-                                all_path_coords.extend([route1["path_coords"], route2["path_coords"]])
-                                info_messages.append(f"区間1適用エリア: **{rule1['name']}** / 区間2適用エリア: **{rule2['name']}**")
-                                caption_messages.append(f"・区間1 (始点➔経由地): {dist1:.2f} km / {fare1:,} 円 (迎車込)")
-                                caption_messages.append(f"・区間2 (経由地➔終点): {dist2:.2f} km / {fare2:,} 円 (迎車込)")
-
-                        # B. メーターを切らない場合（1乗車扱い）
-                        else:
-                            # 💡 始点または終点のどちらかがエリア内でなければ営業エリア外
-                            applied_rule = start_area if start_area else end_area
-
-                            if applied_rule is None and ALL_FEATURES:
-                                error_flag = True
-                                error_message = "始点・終点のどちらも対象の営業エリア外です（途中の経由地がエリア内でも配車できません）。"
-                            else:
-                                if applied_rule is None:
-                                    applied_rule = default_rule
-
-                                info_messages.append(f"適用運賃エリア: **{applied_rule['name']}**")
-                                taxi_fare = calculate_segment_fare(total_distance, applied_rule, is_night)
-                                all_path_coords.extend([route1["path_coords"], route2["path_coords"]])
-
-                # -------------------------------------------------
-                # 結果格納
-                # -------------------------------------------------
                 if error_flag:
-                    st.session_state["calc_result"] = {
-                        "error": True,
-                        "error_message": error_message if error_message else "指定地点のルート検索またはエリア判定に失敗しました。"
-                    }
-                else:
-                    final_toll_fee = api_toll_fee if api_toll_fee > 0 else manual_toll_fee
-                    res_fee = RESERVATION_FEE if use_reservation else 0
-                    grand_total = taxi_fare + res_fee + final_toll_fee
+                    break
 
-                    st.session_state["calc_result"] = {
-                        "error": False,
-                        "total_distance": total_distance,
-                        "taxi_fare": taxi_fare,
-                        "grand_total": grand_total,
-                        "use_reservation": use_reservation,
-                        "total_toll_fee": final_toll_fee,
-                        "info_messages": info_messages,
-                        "caption_messages": caption_messages,
-                        "all_path_coords": all_path_coords
-                    }
-                    st.rerun()
+                seg_fare = calculate_segment_fare(seg_dist, applied_rule, is_night)
+                
+                total_distance += seg_dist
+                api_toll_fee += seg_tolls
+                taxi_fare += seg_fare
+
+                if len(meter_segments) > 1:
+                    info_messages.append(f"区間{seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) 適用エリア: **{applied_rule['name']}**")
+                    caption_messages.append(f"・区間{seg_idx + 1}: {seg_dist:.2f} km / {seg_fare:,} 円 (迎車込)")
+                else:
+                    info_messages.append(f"適用運賃エリア: **{applied_rule['name']}**")
+
+            # 結果格納
+            if error_flag:
+                st.session_state["calc_result"] = {
+                    "error": True,
+                    "error_message": error_message if error_message else "指定地点のルート検索またはエリア判定に失敗しました。"
+                }
+            else:
+                final_toll_fee = api_toll_fee if api_toll_fee > 0 else manual_toll_fee
+                res_fee = RESERVATION_FEE if use_reservation else 0
+                grand_total = taxi_fare + res_fee + final_toll_fee
+
+                st.session_state["calc_result"] = {
+                    "error": False,
+                    "total_distance": total_distance,
+                    "taxi_fare": taxi_fare,
+                    "grand_total": grand_total,
+                    "use_reservation": use_reservation,
+                    "total_toll_fee": final_toll_fee,
+                    "info_messages": info_messages,
+                    "caption_messages": caption_messages,
+                    "all_path_coords": all_path_coords
+                }
+                st.rerun()
 
 # ---------------------------------------------------------
-# 計算結果表示エリア
+# 結果表示
 # ---------------------------------------------------------
 if "calc_result" in st.session_state:
     res = st.session_state["calc_result"]
     if res.get("error"):
-        st.error(f"⛔ {res.get('error_message', '指定地点のルート検索またはエリア判定に失敗しました。')}")
+        st.error(f"⛔ {res.get('error_message', '指定地点のルート検索に失敗しました。')}")
     else:
         st.success("計算が完了しました！")
         
