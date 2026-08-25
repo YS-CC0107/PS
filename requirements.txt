@@ -1,7 +1,7 @@
 streamlit
 requests
 flexpolyline
-googlepolyline
+polyline
 folium
 streamlit-folium
 shapely
