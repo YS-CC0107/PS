@@ -167,8 +167,8 @@ def get_google_route(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=
         leg = route["legs"][0]
         distance_km = leg["distance"]["value"] / 1000.0
 
-        import googlepolyline
-        path_coords = googlepolyline.decode(route["overview_polyline"]["points"])
+        import polyline
+        path_coords = polyline.decode(route["overview_polyline"]["points"])
 
         return {
             "distance_km": distance_km,
