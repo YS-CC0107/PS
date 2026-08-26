@@ -1,12 +1,16 @@
-import streamlit as st
-import requests
+import datetime
+import glob
 import json
 import math
-import glob
 import os
+import sqlite3
+
 import folium
+import polyline
+import requests
+import streamlit as st
+from shapely.geometry import Point, shape
 from streamlit_folium import st_folium
-from shapely.geometry import shape, Point
 
 # ---------------------------------------------------------
 # パスワード認証処理
@@ -51,6 +55,51 @@ HERE_API_KEY = st.secrets.get("HERE_API_KEY", "YOUR_HERE_API_KEY")
 PICKUP_FEE = 300      # 迎車料金 (1乗車につき固定)
 RESERVATION_FEE = 500 # 予約料金 (選択時)
 
+# 全体の上限回数設定 (1日 300 回)
+DAILY_GLOBAL_LIMIT = 300
+DB_FILE = "usage_counter.db"
+
+# ---------------------------------------------------------
+# SQLite 利用回数カウント関数
+# ---------------------------------------------------------
+def init_db():
+    """データベース初期化"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS daily_usage (
+            date TEXT PRIMARY KEY,
+            count INTEGER
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_today_usage():
+    """本日の利用回数を取得"""
+    init_db()
+    today = datetime.date.today().isoformat()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT count FROM daily_usage WHERE date = ?", (today,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def increment_today_usage():
+    """本日の利用回数を 1 増やす"""
+    init_db()
+    today = datetime.date.today().isoformat()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO daily_usage (date, count)
+        VALUES (?, 1)
+        ON CONFLICT(date) DO UPDATE SET count = count + 1
+    """, (today,))
+    conn.commit()
+    conn.close()
+
 # ---------------------------------------------------------
 # Session State 初期化
 # ---------------------------------------------------------
@@ -59,8 +108,6 @@ if "start_point_val" not in st.session_state:
 if "end_point_val" not in st.session_state:
     st.session_state["end_point_val"] = ""
 
-# 経由地の動的リスト (最大3件)
-# 各要素: {"address": "", "reset_meter": True, "coords": None}
 if "via_list" not in st.session_state:
     st.session_state["via_list"] = []
 
@@ -167,7 +214,6 @@ def get_google_route(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=
         leg = route["legs"][0]
         distance_km = leg["distance"]["value"] / 1000.0
 
-        import polyline
         path_coords = polyline.decode(route["overview_polyline"]["points"])
 
         return {
@@ -182,10 +228,6 @@ def get_google_route(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=
 # HERE API 関数（高速料金取得）
 # ---------------------------------------------------------
 def get_here_toll_fee(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=False, path_coords=None):
-    """
-    HERE Routing API v8 で高速料金を取得
-    path_coords (Googleから取得したルート座標群) があれば、中間地点を via に追加してルートを固定する
-    """
     if avoid_highways:
         return 0
 
@@ -201,10 +243,8 @@ def get_here_toll_fee(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways
         "lang": "ja"
     }
 
-    # Googleのルート座標から中間地点（ウェイポイント）抽出してHEREに強制通過させる
-    # これによりGoogleとHEREの通過高速道路・ICのズレを防止する
+    # Googleのルート座標から中間地点をviaに追加してルートのズレを防止
     if path_coords and len(path_coords) > 10:
-        # 1/4 と 3/4 の地点を midway (via) として設定
         idx1 = len(path_coords) // 4
         idx2 = (len(path_coords) * 3) // 4
         via1 = f"{path_coords[idx1][0]},{path_coords[idx1][1]}"
@@ -222,17 +262,15 @@ def get_here_toll_fee(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways
         for section in sections:
             if "tolls" in section:
                 for toll in section["tolls"]:
-                    # fares (料金リスト) から円表記(JPY) の基本料金を取得
                     for fare in toll.get("fares", []):
                         price_val = fare.get("price", {}).get("value", 0)
                         if price_val > 0:
                             total_toll_cost += int(price_val)
                             
         return total_toll_cost
-    except Exception as e:
-        print(f"HERE Toll API Error: {e}")
+    except Exception:
         return 0
-    
+
 # ---------------------------------------------------------
 # タクシー料金計算ロジック
 # ---------------------------------------------------------
@@ -337,12 +375,8 @@ with col2:
     end_point = st.text_input("終点（目的地）", value=st.session_state["end_point_val"])
     st.session_state["end_point_val"] = end_point
 
-# ---------------------------------------------------------
-# 経由地フォームエリア（最大3件）
-# ---------------------------------------------------------
+# 経由地設定
 st.markdown("### 経由地設定（最大3件）")
-
-# 経由地の追加・削除ボタン
 col_b1, col_b2, _ = st.columns([1, 1, 2])
 with col_b1:
     if len(st.session_state["via_list"]) < 3:
@@ -355,7 +389,6 @@ with col_b2:
             st.session_state["via_list"].pop()
             st.rerun()
 
-# 各経由地の入力フォーム表示
 for idx, via_item in enumerate(st.session_state["via_list"]):
     col_v1, col_v2 = st.columns([2, 1])
     with col_v1:
@@ -397,9 +430,7 @@ if use_highway:
         step=100
     )
 
-# ---------------------------------------------------------
-# 地図からの地点設定エリア
-# ---------------------------------------------------------
+# マップ操作
 st.markdown("---")
 st.markdown("### 🗺️ マップ (クリックして地点を設定)")
 
@@ -431,7 +462,6 @@ if "calc_result" in st.session_state and not st.session_state["calc_result"].get
 map_obj = draw_map(current_markers, prev_paths)
 map_data = st_folium(map_obj, width=700, height=450, key="map_component")
 
-# 地図クリック判定
 clicked_point = None
 if map_data:
     if map_data.get("last_clicked"):
@@ -468,10 +498,20 @@ if clicked_point:
                 st.rerun()
 
 # ---------------------------------------------------------
-# 料金計算処理
+# 料金計算処理（1日 300 回の制限管理付き）
 # ---------------------------------------------------------
 st.markdown("---")
-if st.button("料金とルートを計算する", type="primary"):
+
+today_count = get_today_usage()
+remaining = DAILY_GLOBAL_LIMIT - today_count
+is_disabled = today_count >= DAILY_GLOBAL_LIMIT
+
+st.caption(f"💡 本日の全体計算状況: あと **{max(0, remaining)}** / {DAILY_GLOBAL_LIMIT} 回 計算可能です")
+
+if is_disabled:
+    st.error("⚠️ 本日の全体利用上限（300回）に達しました。API費用保護のため、本日の計算機能は停止しています。明日（0時以降）に再度お試しください。")
+
+if st.button("料金とルートを計算する", type="primary", disabled=is_disabled):
     if GOOGLE_MAPS_API_KEY == "YOUR_GOOGLE_API_KEY" or not GOOGLE_MAPS_API_KEY:
         st.error("Secrets またはコード内に Google Maps API Key を設定してください。")
     elif not start_point or not end_point:
@@ -479,10 +519,12 @@ if st.button("料金とルートを計算する", type="primary"):
     elif any(not v["address"] for v in st.session_state["via_list"]):
         st.warning("入力されていない経由地があります。住所を入力するか「経由地を減らす」を押してください。")
     else:
+        # 計算実行時に全体カウントを1増やす
+        increment_today_usage()
+
         with st.spinner("Google Routes と HERE 高速料金を計算中..."):
             avoid_highways = not use_highway
             
-            # 地点リストの作成（始点 ➔ 経由地1 ➔ 経由地2... ➔ 終点）
             points = []
             
             # 始点
@@ -521,20 +563,16 @@ if st.button("料金とルートを計算する", type="primary"):
             st.session_state["end_coords"] = (e_lat, e_lon)
             points.append({"name": end_point, "lat": e_lat, "lon": e_lon, "reset_after": False, "type": "end"})
 
-            # エリア情報の取得
             for pt in points:
                 pt["area"] = find_area(pt["lat"], pt["lon"])
 
             default_rule = {"name": "標準運賃エリア", "base_fare": 500, "base_distance_m": 1000, "add_fare": 100, "add_distance_m": 250}
 
-            # メーター区間ごとにルート・距離・料金を統合計算
-            # reset_after=True ごとに「1つのメーター区間」としてまとめる
             meter_segments = []
             current_segment_pts = [points[0]]
 
             for i in range(1, len(points)):
                 current_segment_pts.append(points[i])
-                # 前の地点でメーターを切る設定、または最終地点に達した場合に区間確定
                 if points[i - 1]["reset_after"] or i == len(points) - 1:
                     meter_segments.append(current_segment_pts)
                     current_segment_pts = [points[i]]
@@ -552,7 +590,6 @@ if st.button("料金とルートを計算する", type="primary"):
                 seg_start = seg_pts[0]
                 seg_end = seg_pts[-1]
                 
-                # エリアチェック（始点または終点のどちらかがエリア内である必要あり）
                 applied_rule = seg_start["area"] if seg_start["area"] else seg_end["area"]
                 if applied_rule is None and ALL_FEATURES:
                     error_flag = True
@@ -562,7 +599,6 @@ if st.button("料金とルートを計算する", type="primary"):
                 if applied_rule is None:
                     applied_rule = default_rule
 
-                # 区間内の連続する2点間ごとのルート・走行距離・高速料金を取得
                 seg_dist = 0.0
                 seg_tolls = 0
                 for k in range(len(seg_pts) - 1):
@@ -577,7 +613,11 @@ if st.button("料金とルートを計算する", type="primary"):
                     seg_dist += route_info["distance_km"]
                     all_path_coords.append(route_info["path_coords"])
 
-                    toll = get_here_toll_fee(p1["lat"], p1["lon"], p2["lat"], p2["lon"], avoid_highways)
+                    # 高速料金取得時にGoogleのパス座標を渡す
+                    toll = get_here_toll_fee(
+                        p1["lat"], p1["lon"], p2["lat"], p2["lon"],
+                        avoid_highways, path_coords=route_info["path_coords"]
+                    )
                     seg_tolls += toll
 
                 if error_flag:
@@ -595,7 +635,6 @@ if st.button("料金とルートを計算する", type="primary"):
                 else:
                     info_messages.append(f"適用運賃エリア: **{applied_rule['name']}**")
 
-            # 結果格納
             if error_flag:
                 st.session_state["calc_result"] = {
                     "error": True,
