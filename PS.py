@@ -181,7 +181,11 @@ def get_google_route(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=
 # ---------------------------------------------------------
 # HERE API 関数（高速料金取得）
 # ---------------------------------------------------------
-def get_here_toll_fee(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=False):
+def get_here_toll_fee(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=False, path_coords=None):
+    """
+    HERE Routing API v8 で高速料金を取得
+    path_coords (Googleから取得したルート座標群) があれば、中間地点を via に追加してルートを固定する
+    """
     if avoid_highways:
         return 0
 
@@ -192,28 +196,43 @@ def get_here_toll_fee(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways
         "destination": f"{dest_lat},{dest_lon}",
         "return": "tolls",
         "tolls[transponders]": "all",
+        "routingMode": "fast",
         "apiKey": HERE_API_KEY,
         "lang": "ja"
     }
+
+    # Googleのルート座標から中間地点（ウェイポイント）抽出してHEREに強制通過させる
+    # これによりGoogleとHEREの通過高速道路・ICのズレを防止する
+    if path_coords and len(path_coords) > 10:
+        # 1/4 と 3/4 の地点を midway (via) として設定
+        idx1 = len(path_coords) // 4
+        idx2 = (len(path_coords) * 3) // 4
+        via1 = f"{path_coords[idx1][0]},{path_coords[idx1][1]}"
+        via2 = f"{path_coords[idx2][0]},{path_coords[idx2][1]}"
+        params["via"] = [via1, via2]
 
     try:
         res = requests.get(url, params=params).json()
         if "routes" not in res or len(res["routes"]) == 0:
             return 0
 
-        sections = res["routes"][0].get("sections", [])
         total_toll_cost = 0
+        sections = res["routes"][0].get("sections", [])
+        
         for section in sections:
             if "tolls" in section:
                 for toll in section["tolls"]:
+                    # fares (料金リスト) から円表記(JPY) の基本料金を取得
                     for fare in toll.get("fares", []):
                         price_val = fare.get("price", {}).get("value", 0)
                         if price_val > 0:
                             total_toll_cost += int(price_val)
+                            
         return total_toll_cost
-    except Exception:
+    except Exception as e:
+        print(f"HERE Toll API Error: {e}")
         return 0
-
+    
 # ---------------------------------------------------------
 # タクシー料金計算ロジック
 # ---------------------------------------------------------
