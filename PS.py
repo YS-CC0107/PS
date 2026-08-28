@@ -53,6 +53,7 @@ HERE_API_KEY = st.secrets.get("HERE_API_KEY", "YOUR_HERE_API_KEY")
 
 PICKUP_FEE = 300      # 迎車料金 (1乗車につき固定)
 RESERVATION_FEE = 500 # 予約料金 (選択時)
+BRIDGE_FEE = 910      # 橋代往復加算料金
 
 # 全体の上限回数設定 (1日 300 回)
 DAILY_GLOBAL_LIMIT = 300
@@ -153,8 +154,26 @@ def load_one_way_area_geojson():
         st.error(f"one_way_area.geojson の読み込みに失敗: {e}")
         return None
 
+@st.cache_data
+def load_bridge_area_geojson():
+    """橋代往復エリア（+910円加算）のGeoJSONを読み込み"""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(base_dir, "bridge_area.geojson")
+
+    if not os.path.exists(file_path):
+        return None
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("features", [])
+    except Exception as e:
+        st.error(f"bridge_area.geojson の読み込みに失敗: {e}")
+        return None
+
 ALL_FEATURES = load_all_area_geojsons()
 ONE_WAY_FEATURES = load_one_way_area_geojson()
+BRIDGE_FEATURES = load_bridge_area_geojson()
 
 def find_area(lat, lon):
     if lat is None or lon is None or not ALL_FEATURES:
@@ -182,6 +201,18 @@ def is_in_one_way_area(lat, lon):
 
     point = Point(lon, lat)
     for feature in ONE_WAY_FEATURES:
+        polygon = shape(feature["geometry"])
+        if polygon.contains(point):
+            return True
+    return False
+
+def is_in_bridge_area(lat, lon):
+    """指定座標が「橋代往復エリア」の内側にあるか判定"""
+    if lat is None or lon is None or not BRIDGE_FEATURES:
+        return False
+
+    point = Point(lon, lat)
+    for feature in BRIDGE_FEATURES:
         polygon = shape(feature["geometry"])
         if polygon.contains(point):
             return True
@@ -248,13 +279,9 @@ def get_google_route(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=
         return None
 
 # ---------------------------------------------------------
-# HERE API 関数（連続走行料金算出・改善版）
+# HERE API 関数（安定化一括ルート算出）
 # ---------------------------------------------------------
 def get_here_toll_fee_full_route(origin_lat, origin_lon, dest_lat, dest_lon, via_coords_list=None, avoid_highways=False):
-    """
-    全区間を一括でHERE APIに渡し、途中の経由地・ジャンクションを via として設定することで
-    分割計算による高速料金安売り現象を防止する
-    """
     if avoid_highways:
         return 0
 
@@ -270,8 +297,10 @@ def get_here_toll_fee_full_route(origin_lat, origin_lon, dest_lat, dest_lon, via
         "lang": "ja"
     }
 
-    if via_coords_list:
-        v_param = [f"{lat},{lon}" for lat, lon in via_coords_list]
+    # APIエラー防止のため、viaは最大5点までに制限
+    if via_coords_list and len(via_coords_list) > 0:
+        limited_vias = via_coords_list[:5]
+        v_param = [f"{lat},{lon}" for lat, lon in limited_vias]
         params["via"] = v_param
 
     try:
@@ -404,7 +433,7 @@ col_b1, col_b2, _ = st.columns([1, 1, 2])
 with col_b1:
     if len(st.session_state["via_list"]) < 3:
         if st.button("➕ 経由地を追加する"):
-            st.session_state["via_list"].append({"address": "", "reset_meter": True, "coords": None})
+            st.session_state["via_list"].append({"address": "", "reset_meter": False, "coords": None})
             st.rerun()
 with col_b2:
     if len(st.session_state["via_list"]) > 0:
@@ -521,7 +550,7 @@ if clicked_point:
                 st.rerun()
 
 # ---------------------------------------------------------
-# 料金計算処理（連続走行の高速料金計算・300km制限・赤枠判定）
+# 料金計算処理
 # ---------------------------------------------------------
 st.markdown("---")
 
@@ -554,7 +583,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 st.error("始点の位置情報が取得できませんでした。")
                 st.stop()
             st.session_state["start_coords"] = (s_lat, s_lon)
-            points.append({"name": start_point, "lat": s_lat, "lon": s_lon, "reset_after": True, "type": "start"})
+            points.append({"name": start_point, "lat": s_lat, "lon": s_lon, "reset_after": False, "type": "start"})
 
             # 2. 経由地
             via_error = False
@@ -590,15 +619,17 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
 
             default_rule = {"name": "標準運賃エリア", "base_fare": 500, "base_distance_m": 1000, "add_fare": 100, "add_distance_m": 250}
 
-            # メーター切断ごとの区間に分割
+            # 【修正】「メーター切り直し」チェックが入っている地点でのみ区間を分割する
             meter_segments = []
             current_segment_pts = [points[0]]
 
             for i in range(1, len(points)):
                 current_segment_pts.append(points[i])
+                # 前の地点で「メーター切り直し」が有効な場合、または最終目的地の時に区間確定
                 if points[i - 1]["reset_after"] or i == len(points) - 1:
                     meter_segments.append(current_segment_pts)
-                    current_segment_pts = [points[i]]
+                    if i < len(points) - 1:
+                        current_segment_pts = [points[i]]
 
             all_path_coords = []
             total_distance = 0.0
@@ -608,7 +639,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             info_messages = []
             caption_messages = []
 
-            # 経由地含む全サンプリング座標の収集（HERE APIの連続走行ルート固定用）
+            # 高速一括計算用の簡略化経由地リスト
             here_via_coords = []
 
             for seg_idx, seg_pts in enumerate(meter_segments):
@@ -632,11 +663,9 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     seg_dist += route_info["distance_km"]
                     all_path_coords.append(route_info["path_coords"])
 
-                    # 途中の経由点・パスの中間座標をサンプリングして累積（高速道路上で切り離されないようにする）
-                    p_coords = route_info["path_coords"]
-                    if len(p_coords) > 5:
-                        mid_idx = len(p_coords) // 2
-                        here_via_coords.append(p_coords[mid_idx])
+                    # 通過地点（中間経由地）がある場合は高速計算用経由地として1点のみ追加
+                    if k < len(seg_pts) - 2:
+                        here_via_coords.append((p2["lat"], p2["lon"]))
 
                 if error_flag:
                     break
@@ -674,17 +703,23 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     avoid_highways=avoid_highways
                 )
 
-                # 赤い枠（one_way_area）外判定による往復（2倍）処理
+                # 1. 赤い枠（one_way_area）外判定による往復（2倍）処理
                 start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
                 end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
-
-                # 💡 往復フラグを判定
                 is_round_trip = (not start_in_one_way) or (not end_in_one_way)
 
                 if is_round_trip:
                     api_toll_fee = raw_toll * 2
                 else:
                     api_toll_fee = raw_toll
+
+                # 2. 橋代往復エリア判定（+910円加算）
+                start_in_bridge = is_in_bridge_area(points[0]["lat"], points[0]["lon"])
+                end_in_bridge = is_in_bridge_area(points[-1]["lat"], points[-1]["lon"])
+                has_bridge_fee = (start_in_bridge or end_in_bridge) and use_highway
+
+                if has_bridge_fee:
+                    api_toll_fee += BRIDGE_FEE
 
                 final_toll_fee = api_toll_fee if api_toll_fee > 0 else manual_toll_fee
                 res_fee = RESERVATION_FEE if use_reservation else 0
@@ -697,7 +732,8 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     "grand_total": grand_total,
                     "use_reservation": use_reservation,
                     "total_toll_fee": final_toll_fee,
-                    "is_round_trip": is_round_trip,  # 💡 往復フラグを追加
+                    "is_round_trip": is_round_trip,
+                    "has_bridge_fee": has_bridge_fee,
                     "info_messages": info_messages,
                     "caption_messages": caption_messages,
                     "all_path_coords": all_path_coords
@@ -721,9 +757,11 @@ if "calc_result" in st.session_state:
 
         has_toll = res["total_toll_fee"] > 0
         
-        # 💡 往復判定に応じて表示ラベルを切り替え
+        # 往復判定 & 橋代加算表示ラベルの構築
         toll_label = "高速料金のみ (往復エリア)" if res.get("is_round_trip", False) else "高速料金のみ (ETC)"
-        
+        if res.get("has_bridge_fee", False):
+            toll_label += " ※橋代+910円込"
+
         if has_toll:
             c1, c2, c3, c4 = st.columns(4)
             with c1:
