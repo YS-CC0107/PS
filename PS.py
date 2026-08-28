@@ -678,7 +678,10 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
                 end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
 
-                if not start_in_one_way or not end_in_one_way:
+                # 💡 往復フラグを判定
+                is_round_trip = (not start_in_one_way) or (not end_in_one_way)
+
+                if is_round_trip:
                     api_toll_fee = raw_toll * 2
                 else:
                     api_toll_fee = raw_toll
@@ -694,6 +697,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     "grand_total": grand_total,
                     "use_reservation": use_reservation,
                     "total_toll_fee": final_toll_fee,
+                    "is_round_trip": is_round_trip,  # 💡 往復フラグを追加
                     "info_messages": info_messages,
                     "caption_messages": caption_messages,
                     "all_path_coords": all_path_coords
@@ -717,6 +721,9 @@ if "calc_result" in st.session_state:
 
         has_toll = res["total_toll_fee"] > 0
         
+        # 💡 往復判定に応じて表示ラベルを切り替え
+        toll_label = "高速料金のみ (往復エリア)" if res.get("is_round_trip", False) else "高速料金のみ (ETC)"
+        
         if has_toll:
             c1, c2, c3, c4 = st.columns(4)
             with c1:
@@ -724,7 +731,7 @@ if "calc_result" in st.session_state:
             with c2:
                 st.metric("タクシー運賃 (迎車込)", f"{res['taxi_fare']:,} 円")
             with c3:
-                st.metric("高速料金のみ (ETC)", f"{res['total_toll_fee']:,} 円")
+                st.metric(toll_label, f"{res['total_toll_fee']:,} 円")
             with c4:
                 st.metric("支払総額 (合計)", f"{res['grand_total']:,} 円")
         else:
@@ -740,6 +747,6 @@ if "calc_result" in st.session_state:
         if res["use_reservation"]:
             details.append(f"予約料金: {RESERVATION_FEE}円")
         if has_toll:
-            details.append(f"高速料金(ETC): {res['total_toll_fee']:,}円")
+            details.append(f"{toll_label}: {res['total_toll_fee']:,}円")
         
         st.markdown(f"**【金額内訳】** {' + '.join(details)} ＝ **合計 {res['grand_total']:,}円**")
