@@ -179,11 +179,11 @@ def find_area(lat, lon):
     if lat is None or lon is None or not ALL_FEATURES:
         return None
 
-    point = Point(lon, lat)
+    point = Point(lon, lat)  # Point(経度, 緯度)
 
     for feature in ALL_FEATURES:
         polygon = shape(feature["geometry"])
-        if polygon.contains(point):
+        if polygon.intersects(point) or polygon.contains(point):
             props = feature["properties"]
             return {
                 "name": props.get("name", "名称未設定"),
@@ -195,26 +195,27 @@ def find_area(lat, lon):
     return None
 
 def is_in_one_way_area(lat, lon):
-    """指定座標が「赤い枠（片道エリア）」の内側にあるか判定"""
+    """指定座標が「赤い枠（片道エリア）」の内側（または境界線上）にあるか判定"""
     if lat is None or lon is None or not ONE_WAY_FEATURES:
         return False
 
-    point = Point(lon, lat)
+    point = Point(lon, lat)  # Shapelyでは Point(経度, 緯度) の順番
     for feature in ONE_WAY_FEATURES:
         polygon = shape(feature["geometry"])
-        if polygon.contains(point):
+        # intersects または covers を使用して境界線上の判定漏れを防止
+        if polygon.intersects(point) or polygon.covers(point):
             return True
     return False
 
 def is_in_bridge_area(lat, lon):
-    """指定座標が「橋代往復エリア」の内側にあるか判定"""
+    """指定座標が「橋代往復エリア」の内側（または境界線上）にあるか判定"""
     if lat is None or lon is None or not BRIDGE_FEATURES:
         return False
 
-    point = Point(lon, lat)
+    point = Point(lon, lat)  # Shapelyでは Point(経度, 緯度) の順番
     for feature in BRIDGE_FEATURES:
         polygon = shape(feature["geometry"])
-        if polygon.contains(point):
+        if polygon.intersects(point) or polygon.covers(point):
             return True
     return False
 
