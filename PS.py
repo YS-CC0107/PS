@@ -279,7 +279,7 @@ def get_google_route(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=
         return None
 
 # ---------------------------------------------------------
-# HERE API 関数（安定化一括ルート算出）
+# HERE API 関数（一括ルート算出）
 # ---------------------------------------------------------
 def get_here_toll_fee_full_route(origin_lat, origin_lon, dest_lat, dest_lon, via_coords_list=None, avoid_highways=False):
     if avoid_highways:
@@ -297,7 +297,6 @@ def get_here_toll_fee_full_route(origin_lat, origin_lon, dest_lat, dest_lon, via
         "lang": "ja"
     }
 
-    # APIエラー防止のため、viaは最大5点までに制限
     if via_coords_list and len(via_coords_list) > 0:
         limited_vias = via_coords_list[:5]
         v_param = [f"{lat},{lon}" for lat, lon in limited_vias]
@@ -613,19 +612,31 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             st.session_state["end_coords"] = (e_lat, e_lon)
             points.append({"name": end_point, "lat": e_lat, "lon": e_lon, "reset_after": False, "type": "end"})
 
-            # エリア判定
+            # ---------------------------------------------------------
+            # エリア内外判定のチェック（両方エリア外は計算不可）
+            # ---------------------------------------------------------
+            start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
+            end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
+
+            if not start_in_one_way and not end_in_one_way:
+                st.session_state["calc_result"] = {
+                    "error": True,
+                    "error_message": "始点および終点の両方が営業エリア外（赤い枠外）のため、料金計算を行えません。"
+                }
+                st.rerun()
+
+            # タクシー料金ルール適用エリア判定
             for pt in points:
                 pt["area"] = find_area(pt["lat"], pt["lon"])
 
             default_rule = {"name": "標準運賃エリア", "base_fare": 500, "base_distance_m": 1000, "add_fare": 100, "add_distance_m": 250}
 
-            # 【修正】「メーター切り直し」チェックが入っている地点でのみ区間を分割する
+            # 「メーター切り直し」指定区間の分割設定
             meter_segments = []
             current_segment_pts = [points[0]]
 
             for i in range(1, len(points)):
                 current_segment_pts.append(points[i])
-                # 前の地点で「メーター切り直し」が有効な場合、または最終目的地の時に区間確定
                 if points[i - 1]["reset_after"] or i == len(points) - 1:
                     meter_segments.append(current_segment_pts)
                     if i < len(points) - 1:
@@ -639,7 +650,6 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             info_messages = []
             caption_messages = []
 
-            # 高速一括計算用の簡略化経由地リスト
             here_via_coords = []
 
             for seg_idx, seg_pts in enumerate(meter_segments):
@@ -663,7 +673,6 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     seg_dist += route_info["distance_km"]
                     all_path_coords.append(route_info["path_coords"])
 
-                    # 通過地点（中間経由地）がある場合は高速計算用経由地として1点のみ追加
                     if k < len(seg_pts) - 2:
                         here_via_coords.append((p2["lat"], p2["lon"]))
 
@@ -675,7 +684,6 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 total_distance += seg_dist
                 taxi_fare += seg_fare
 
-                # 走行距離 300km 超過チェック
                 if total_distance > 300.0:
                     error_flag = True
                     error_message = f"走行距離が 300km ({total_distance:.1f}km) を超えているため、料金計算を行えません。"
@@ -694,7 +702,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 }
             else:
                 # ---------------------------------------------------------
-                # 高速料金算出（一括通し計算で高速上の経由地による安売りを修正）
+                # 高速料金算出（片方がエリア外の場合のみ往復2倍）
                 # ---------------------------------------------------------
                 raw_toll = get_here_toll_fee_full_route(
                     points[0]["lat"], points[0]["lon"],
@@ -703,17 +711,15 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     avoid_highways=avoid_highways
                 )
 
-                # 1. 赤い枠（one_way_area）外判定による往復（2倍）処理
-                start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
-                end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
-                is_round_trip = (not start_in_one_way) or (not end_in_one_way)
+                # 片方のみエリア外か判定（XOR条件）
+                is_round_trip = start_in_one_way != end_in_one_way
 
                 if is_round_trip:
                     api_toll_fee = raw_toll * 2
                 else:
                     api_toll_fee = raw_toll
 
-                # 2. 橋代往復エリア判定（+910円加算）
+                # 橋代往復エリア判定（+910円加算）
                 start_in_bridge = is_in_bridge_area(points[0]["lat"], points[0]["lon"])
                 end_in_bridge = is_in_bridge_area(points[-1]["lat"], points[-1]["lon"])
                 has_bridge_fee = (start_in_bridge or end_in_bridge) and use_highway
@@ -757,7 +763,6 @@ if "calc_result" in st.session_state:
 
         has_toll = res["total_toll_fee"] > 0
         
-        # 往復判定 & 橋代加算表示ラベルの構築
         toll_label = "高速料金のみ (往復エリア)" if res.get("is_round_trip", False) else "高速料金のみ (ETC)"
         if res.get("has_bridge_fee", False):
             toll_label += " ※橋代+910円込"
