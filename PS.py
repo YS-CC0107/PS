@@ -179,7 +179,7 @@ def find_area(lat, lon):
     if lat is None or lon is None or not ALL_FEATURES:
         return None
 
-    point = Point(lon, lat)  # Point(経度, 緯度) の順番
+    point = Point(lon, lat)  # Point(経度, 緯度)
 
     for feature in ALL_FEATURES:
         polygon = shape(feature["geometry"])
@@ -195,13 +195,14 @@ def find_area(lat, lon):
     return None
 
 def is_in_one_way_area(lat, lon):
+    """指定座標が「赤い枠（片道エリア）」の内側にあるか判定"""
     if lat is None or lon is None or not ONE_WAY_FEATURES:
         return False
 
-    point = Point(lon, lat)
+    point = Point(lon, lat)  # Point(経度, 緯度)
     for feature in ONE_WAY_FEATURES:
         polygon = shape(feature["geometry"])
-        if polygon.intersects(point) or polygon.covers(point):
+        if polygon.intersects(point) or polygon.covers(point) or polygon.contains(point):
             return True
     return False
 
@@ -212,7 +213,7 @@ def is_in_bridge_area(lat, lon):
     point = Point(lon, lat)
     for feature in BRIDGE_FEATURES:
         polygon = shape(feature["geometry"])
-        if polygon.intersects(point) or polygon.covers(point):
+        if polygon.intersects(point) or polygon.covers(point) or polygon.contains(point):
             return True
     return False
 
@@ -571,7 +572,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             avoid_highways = not use_highway
             points = []
             
-            # 1. 始点
+            # 1. 始点座標取得
             s_lat, s_lon = get_coordinates_google(start_point)
             if s_lat is None:
                 st.error("始点の位置情報が取得できませんでした。")
@@ -579,7 +580,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             st.session_state["start_coords"] = (s_lat, s_lon)
             points.append({"name": start_point, "lat": s_lat, "lon": s_lon, "reset_after": False, "type": "start"})
 
-            # 2. 経由地
+            # 2. 経由地座標取得
             via_error = False
             for idx, via_item in enumerate(st.session_state["via_list"]):
                 v_lat, v_lon = get_coordinates_google(via_item["address"])
@@ -599,7 +600,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             if via_error:
                 st.stop()
 
-            # 3. 終点
+            # 3. 終点座標取得
             e_lat, e_lon = get_coordinates_google(end_point)
             if e_lat is None:
                 st.error("終点の位置情報が取得できませんでした。")
@@ -607,25 +608,29 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             st.session_state["end_coords"] = (e_lat, e_lon)
             points.append({"name": end_point, "lat": e_lat, "lon": e_lon, "reset_after": False, "type": "end"})
 
-            # 全体エリアチェック（始点・終点のどちらも赤い枠外ならエラー）
+            # ---------------------------------------------------------
+            # 💡【重要修正1】営業エリア（赤い枠）チェック＆強制停止ガード
+            # ---------------------------------------------------------
             start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
             end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
 
+            # 始点・終点ともに赤枠外であればエラーを出して完全に処理を停止
             if not start_in_one_way and not end_in_one_way:
                 st.session_state["calc_result"] = {
                     "error": True,
                     "error_message": "始点および終点の両方が営業エリア外（赤い枠外）のため、料金計算を行えません。"
                 }
                 st.rerun()
+                st.stop()
 
-            # 各地点ごとの運賃ルール（area_*.geojson）判定
+            # ---------------------------------------------------------
+            # 💡【重要修正2】各地点ごとの運賃エリア（area_*.geojson）判定
+            # ---------------------------------------------------------
             default_rule = {"name": "標準運賃エリア", "base_fare": 500, "base_distance_m": 1000, "add_fare": 100, "add_distance_m": 250}
             for pt in points:
                 pt["area"] = find_area(pt["lat"], pt["lon"])
 
-            # ---------------------------------------------------------
             # メーター切り直し区間の分割
-            # ---------------------------------------------------------
             meter_segments = []
             current_segment_pts = [points[0]]
 
@@ -645,9 +650,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             caption_messages = []
             here_via_coords = []
 
-            # ---------------------------------------------------------
             # 区間ごとの運賃計算
-            # ---------------------------------------------------------
             for seg_idx, seg_pts in enumerate(meter_segments):
                 seg_start = seg_pts[0]
                 seg_end = seg_pts[-1]
