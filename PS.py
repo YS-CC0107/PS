@@ -181,7 +181,7 @@ def find_area(lat, lon):
 
     point = Point(lon, lat)
 
-    # 1. 通常判定（完全に内部・交差しているか）
+    # 1. 通常判定
     for feature in ALL_FEATURES:
         polygon = shape(feature["geometry"])
         if polygon.intersects(point) or polygon.covers(point) or polygon.contains(point):
@@ -194,8 +194,7 @@ def find_area(lat, lon):
                 "add_distance_m": int(props.get("add_distance_m", 250))
             }
 
-    # 2. 境界線のわずかなズレ（約100m以内）を吸収するバッファ判定
-    # ※度数法で約0.001度 ≒ 約100mのゆとりを持たせて再検索
+    # 2. 境界線付近のバッファ判定 (約100mのゆとり)
     buffered_point = point.buffer(0.001)
     for feature in ALL_FEATURES:
         polygon = shape(feature["geometry"])
@@ -429,7 +428,7 @@ def draw_map(points_markers=None, all_path_coords=None):
 # ---------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------
-st.title("MKタクシー料金計算アプリ")
+st.title("🚖 タクシー料金計算アプリ (Google Maps × HERE API 版)")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -632,21 +631,26 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
             end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
 
-            # メーター切り直し区間の分割処理
+            # ---------------------------------------------------------
+            # 💡 メーター切り直し区間の正確な分割ロジック（修正済）
+            # ---------------------------------------------------------
             meter_segments = []
-            current_segment_pts = [points[0]]
+            curr_seg = [points[0]]
 
-            for i in range(1, len(points)):
-                current_segment_pts.append(points[i])
-                # メーター切り直しフラグがあるか、最後の地点の場合は区間を確定
-                if points[i - 1]["reset_after"] or i == len(points) - 1:
-                    meter_segments.append(current_segment_pts)
-                    if i < len(points) - 1:
-                        # 直前の地点（経由地）を次の区間の始点として開始
-                        current_segment_pts = [points[i - 1]]
+            for pt in points[1:]:
+                curr_seg.append(pt)
+                # 直前で切り直しが指定されていた場合、現在の地点（pt）を終点として区間を確定する
+                if curr_seg[-2].get("reset_after"):
+                    meter_segments.append(curr_seg)
+                    # 次の区間は「この切り直し地点（pt）」を新たな始点としてスタート
+                    curr_seg = [pt]
+
+            # 最後の区間を確定
+            if len(curr_seg) > 1 or not meter_segments:
+                meter_segments.append(curr_seg)
 
             # ---------------------------------------------------------
-            # 💡 営業エリアチェック＆メーター料金計算ロジック（厳格修正版）
+            # 💡 営業エリアチェック＆メーター料金計算ロジック
             # ---------------------------------------------------------
             all_path_coords = []
             total_distance = 0.0
