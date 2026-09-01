@@ -611,8 +611,11 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             for pt in points:
                 pt["area"] = find_area(pt["lat"], pt["lon"])
 
-            # 💡 始点・終点の両方がエリア外（area == None）の場合は厳格ブロック
-            if points[0]["area"] is None and points[-1]["area"] is None:
+            # 💡 全体の「最初の始点」と「最後の終点」の両方がエリア外（None）の時のみ即エラーブロック
+            first_start_area = points[0]["area"]
+            last_end_area = points[-1]["area"]
+            
+            if first_start_area is None and last_end_area is None:
                 st.session_state["calc_result"] = {
                     "error": True,
                     "error_message": "始点および終点の両方が営業エリア外のため、料金計算を行えません。"
@@ -643,15 +646,15 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             caption_messages = []
             here_via_coords = []
 
-            # 信頼できるデフォルトエリア（手配全体で最初に見つかった有効な営業エリア）
-            fallback_area = next((p["area"] for p in points if p["area"] is not None), None)
+            # 信頼できる適用エリアのフォールバック（手配全地点の中で最初に見つかった有効なエリア）
+            global_fallback_area = next((p["area"] for p in points if p["area"] is not None), None)
 
             for seg_idx, seg_pts in enumerate(meter_segments):
                 seg_start = seg_pts[0]
                 seg_end = seg_pts[-1]
                 
-                # 区間内の始点エリア ➔ 区間内の終点エリア ➔ 全体で最初に見つかったエリア の順で適用
-                applied_rule = seg_start.get("area") or seg_end.get("area") or fallback_area
+                # 区間内の始点エリア ➔ 区間内の終点エリア ➔ 手配全体の有効エリア の順で確実に取得
+                applied_rule = seg_start.get("area") or seg_end.get("area") or global_fallback_area
 
                 seg_dist = 0.0
                 for k in range(len(seg_pts) - 1):
