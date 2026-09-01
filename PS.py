@@ -181,6 +181,7 @@ def find_area(lat, lon):
 
     point = Point(lon, lat)
 
+    # 1. 通常判定（完全に内部・交差しているか）
     for feature in ALL_FEATURES:
         polygon = shape(feature["geometry"])
         if polygon.intersects(point) or polygon.covers(point) or polygon.contains(point):
@@ -192,6 +193,22 @@ def find_area(lat, lon):
                 "add_fare": int(props.get("add_fare", 100)),
                 "add_distance_m": int(props.get("add_distance_m", 250))
             }
+
+    # 2. 境界線のわずかなズレ（約100m以内）を吸収するバッファ判定
+    # ※度数法で約0.001度 ≒ 約100mのゆとりを持たせて再検索
+    buffered_point = point.buffer(0.001)
+    for feature in ALL_FEATURES:
+        polygon = shape(feature["geometry"])
+        if polygon.intersects(buffered_point):
+            props = feature["properties"]
+            return {
+                "name": props.get("name", "名称未設定"),
+                "base_fare": int(props.get("base_fare", 500)),
+                "base_distance_m": int(props.get("base_distance_m", 1000)),
+                "add_fare": int(props.get("add_fare", 100)),
+                "add_distance_m": int(props.get("add_distance_m", 250))
+            }
+
     return None
 
 def is_in_one_way_area(lat, lon):
