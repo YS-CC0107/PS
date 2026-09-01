@@ -626,6 +626,9 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     if i < len(points) - 1:
                         current_segment_pts = [points[i]]
 
+            # ---------------------------------------------------------
+            # 営業エリアチェック＆メーター料金計算ロジック
+            # ---------------------------------------------------------
             all_path_coords = []
             total_distance = 0.0
             taxi_fare = 0
@@ -635,56 +638,64 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             caption_messages = []
             here_via_coords = []
 
-            # 💡 メーター区間ごとにエリア判定を厳密に実施
-            for seg_idx, seg_pts in enumerate(meter_segments):
-                seg_start = seg_pts[0]
-                seg_end = seg_pts[-1]
-                
-                # 区間内の地点からエリアルールを取得（始点 ➔ 終点 ➔ 区間内経由地の優先順位）
-                applied_rule = seg_start.get("area") or seg_end.get("area")
-                if applied_rule is None:
-                    applied_rule = next((pt["area"] for pt in seg_pts if pt.get("area") is not None), None)
+            # 全経由地点のリスト（HERE API通し計算用）
+            for pt in points[1:-1]:
+                here_via_coords.append((pt["lat"], pt["lon"]))
 
-                # 区間内にエリア判定できる地点が1つも含まれない場合のみエラー
-                if applied_rule is None:
+            # 1. メーター切り直しがない（全区間通し）場合で、始点・終点ともにエリア外かをチェック
+            if len(meter_segments) == 1:
+                seg_start = meter_segments[0][0]
+                seg_end = meter_segments[0][-1]
+                if seg_start.get("area") is None and seg_end.get("area") is None:
                     error_flag = True
-                    error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は営業エリアが含まれないため計算できません。"
-                    break
+                    error_message = "始点および終点がともに営業エリア外のため計算できません。（メーター切り直しがない場合は、始点・終点のいずれかが営業エリア内である必要があります）"
 
-                seg_dist = 0.0
-                for k in range(len(seg_pts) - 1):
-                    p1 = seg_pts[k]
-                    p2 = seg_pts[k + 1]
+            # 2. 各メーター区間ごとの計算処理
+            if not error_flag:
+                for seg_idx, seg_pts in enumerate(meter_segments):
+                    seg_start = seg_pts[0]
+                    seg_end = seg_pts[-1]
+                    
+                    # 区間始点または区間終点のエリア情報を取得（エリア内のルールを採用）
+                    applied_rule = seg_start.get("area") or seg_end.get("area")
 
-                    route_info = get_google_route(p1["lat"], p1["lon"], p2["lat"], p2["lon"], avoid_highways)
-                    if route_info is None:
+                    # 区間の始点・終点が共にエリア外の場合はエラー
+                    if applied_rule is None:
                         error_flag = True
+                        error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は始点・終点ともに営業エリア外のため計算できません。"
                         break
 
-                    seg_dist += route_info["distance_km"]
-                    all_path_coords.append(route_info["path_coords"])
+                    seg_dist = 0.0
+                    for k in range(len(seg_pts) - 1):
+                        p1 = seg_pts[k]
+                        p2 = seg_pts[k + 1]
 
-                    if k < len(seg_pts) - 2:
-                        here_via_coords.append((p2["lat"], p2["lon"]))
+                        route_info = get_google_route(p1["lat"], p1["lon"], p2["lat"], p2["lon"], avoid_highways)
+                        if route_info is None:
+                            error_flag = True
+                            break
 
-                if error_flag:
-                    break
+                        seg_dist += route_info["distance_km"]
+                        all_path_coords.append(route_info["path_coords"])
 
-                seg_fare = calculate_segment_fare(seg_dist, applied_rule, is_night)
-                
-                total_distance += seg_dist
-                taxi_fare += seg_fare
+                    if error_flag:
+                        break
 
-                if total_distance > 300.0:
-                    error_flag = True
-                    error_message = f"走行距離が 300km ({total_distance:.1f}km) を超えているため、計算できません。"
-                    break
+                    seg_fare = calculate_segment_fare(seg_dist, applied_rule, is_night)
+                    
+                    total_distance += seg_dist
+                    taxi_fare += seg_fare
 
-                if len(meter_segments) > 1:
-                    info_messages.append(f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) 適用エリア: **{applied_rule['name']}**")
-                    caption_messages.append(f"・区間 {seg_idx + 1}: {seg_dist:.2f} km / {seg_fare:,} 円 (迎車込)")
-                else:
-                    info_messages.append(f"適用運賃エリア: **{applied_rule['name']}**")
+                    if total_distance > 300.0:
+                        error_flag = True
+                        error_message = f"走行距離が 300km ({total_distance:.1f}km) を超えているため、計算できません。"
+                        break
+
+                    if len(meter_segments) > 1:
+                        info_messages.append(f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) 適用エリア: **{applied_rule['name']}**")
+                        caption_messages.append(f"・区間 {seg_idx + 1}: {seg_dist:.2f} km / {seg_fare:,} 円 (迎車込)")
+                    else:
+                        info_messages.append(f"適用運賃エリア: **{applied_rule['name']}**")
 
             if error_flag:
                 st.session_state["calc_result"] = {
@@ -692,7 +703,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     "error_message": error_message if error_message else "ルート検索に失敗しました。"
                 }
             else:
-                # 高速料金算出
+                # 3. 高速料金算出（全行程通しで計算）
                 raw_toll = get_here_toll_fee_full_route(
                     points[0]["lat"], points[0]["lon"],
                     points[-1]["lat"], points[-1]["lon"],
