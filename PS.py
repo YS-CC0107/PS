@@ -611,9 +611,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             for pt in points:
                 pt["area"] = find_area(pt["lat"], pt["lon"])
 
-            # ---------------------------------------------------------
-            # 💡 厳格チェック：始点・終点の両方がエリア外（area == None）の場合は計算不可
-            # ---------------------------------------------------------
+            # 💡 始点・終点の両方がエリア外（area == None）の場合は厳格ブロック
             if points[0]["area"] is None and points[-1]["area"] is None:
                 st.session_state["calc_result"] = {
                     "error": True,
@@ -625,9 +623,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
             end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
 
-            # ---------------------------------------------------------
             # メーター切り直し区間の分割
-            # ---------------------------------------------------------
             meter_segments = []
             current_segment_pts = [points[0]]
 
@@ -647,22 +643,15 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             caption_messages = []
             here_via_coords = []
 
-            # ---------------------------------------------------------
-            # 区間ごとの運賃計算
-            # ---------------------------------------------------------
-            default_fallback_rule = {"name": "標準運賃エリア", "base_fare": 500, "base_distance_m": 1000, "add_fare": 100, "add_distance_m": 250}
+            # 信頼できるデフォルトエリア（手配全体で最初に見つかった有効な営業エリア）
+            fallback_area = next((p["area"] for p in points if p["area"] is not None), None)
 
             for seg_idx, seg_pts in enumerate(meter_segments):
                 seg_start = seg_pts[0]
                 seg_end = seg_pts[-1]
                 
-                # 区間内の始点エリアを優先適用。エリア外なら区間内の終点エリアを適用
-                applied_rule = seg_start.get("area") or seg_end.get("area")
-                
-                # どちらもエリア外の場合、全体の中で有効なエリア設定があればそれを採用（無ければ標準ルール）
-                if applied_rule is None:
-                    valid_areas = [p["area"] for p in points if p["area"] is not None]
-                    applied_rule = valid_areas[0] if len(valid_areas) > 0 else default_fallback_rule
+                # 区間内の始点エリア ➔ 区間内の終点エリア ➔ 全体で最初に見つかったエリア の順で適用
+                applied_rule = seg_start.get("area") or seg_end.get("area") or fallback_area
 
                 seg_dist = 0.0
                 for k in range(len(seg_pts) - 1):
