@@ -426,6 +426,16 @@ def draw_map(points_markers=None, all_path_coords=None):
     return m
 
 # ---------------------------------------------------------
+# 経由地入力の即時同期用コールバック関数
+# ---------------------------------------------------------
+def update_via_address(idx):
+    st.session_state["via_list"][idx]["address"] = st.session_state[f"via_address_input_{idx}"]
+    st.session_state["via_list"][idx]["coords"] = None  # 住所変更時は座標クリア
+
+def update_via_reset(idx):
+    st.session_state["via_list"][idx]["reset_meter"] = st.session_state[f"via_reset_check_{idx}"]
+
+# ---------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------
 st.title("🚖 タクシー料金計算アプリ (Google Maps × HERE API 版)")
@@ -452,25 +462,27 @@ with col_b2:
             st.session_state["via_list"].pop()
             st.rerun()
 
-# 💡 状態の非同期ブレを防ぐためセッション管理構造を改善
+# 💡 on_change コールバックでチェック操作をミリ秒単位でセッションへ強制即時反映
 for idx in range(len(st.session_state["via_list"])):
     col_v1, col_v2 = st.columns([2, 1])
     with col_v1:
-        v_address = st.text_input(
+        st.text_input(
             f"経由地 {idx + 1} の場所",
             value=st.session_state["via_list"][idx]["address"],
-            key=f"via_address_input_{idx}"
+            key=f"via_address_input_{idx}",
+            on_change=update_via_address,
+            args=(idx,)
         )
-        st.session_state["via_list"][idx]["address"] = v_address
     with col_v2:
         st.write("")
         st.write("")
-        v_reset = st.checkbox(
+        st.checkbox(
             f"経由地 {idx + 1} でメーター切り直し",
             value=st.session_state["via_list"][idx]["reset_meter"],
-            key=f"via_reset_check_{idx}"
+            key=f"via_reset_check_{idx}",
+            on_change=update_via_reset,
+            args=(idx,)
         )
-        st.session_state["via_list"][idx]["reset_meter"] = v_reset
 
 st.markdown("### 料金オプション設定")
 col_opt1, col_opt2, col_opt3 = st.columns(3)
@@ -584,6 +596,12 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
     else:
         increment_today_usage()
 
+        # 🔍 デバッグ用出力：実際の読み込み状況を画面上に表示
+        st.write("--- 🔍 内部認識データのデバッグ確認 ---")
+        for i, v in enumerate(st.session_state["via_list"]):
+            st.write(f"経由地 {i+1}: 場所='{v['address']}', メーター切り直し={v['reset_meter']}")
+        st.write("------------------------------------")
+
         with st.spinner("Google Routes と HERE 高速料金を計算中..."):
             avoid_highways = not use_highway
             points = []
@@ -632,27 +650,20 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
             end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
 
-            # ---------------------------------------------------------
-            # 💡 メーター切り直し区間の正確な分割ロジック
-            # ---------------------------------------------------------
+            # メーター切り直し区間の分割ロジック
             meter_segments = []
             curr_seg = [points[0]]
 
             for pt in points[1:]:
                 curr_seg.append(pt)
-                # 直前で切り直しが指定されていた場合、現在の地点（pt）を終点として区間を確定する
                 if curr_seg[-2].get("reset_after"):
                     meter_segments.append(curr_seg)
-                    # 次の区間は「この切り直し地点（pt）」を新たな始点としてスタート
                     curr_seg = [pt]
 
-            # 最後の区間を確定
             if len(curr_seg) > 1 or not meter_segments:
                 meter_segments.append(curr_seg)
 
-            # ---------------------------------------------------------
-            # 💡 営業エリアチェック＆メーター料金計算ロジック
-            # ---------------------------------------------------------
+            # 営業エリアチェック＆メーター料金計算ロジック
             all_path_coords = []
             total_distance = 0.0
             taxi_fare = 0
@@ -662,11 +673,10 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             caption_messages = []
             here_via_coords = []
 
-            # 全経由地点のリスト（HERE API通し計算用）
             for pt in points[1:-1]:
                 here_via_coords.append((pt["lat"], pt["lon"]))
 
-            # 【判定1】メーター切り直しがない（通し）場合：始点・終点がともにエリア外ならエラー
+            # 通し計算の場合のエリア外チェック
             if len(meter_segments) == 1:
                 start_area = points[0].get("area")
                 end_area = points[-1].get("area")
@@ -674,16 +684,14 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     error_flag = True
                     error_message = "始点および終点がともに営業エリア外のため計算できません。（メーター切り直しがない場合は、始点・終点のいずれかが営業エリア内である必要があります）"
 
-            # 【判定2】各メーター区間の計算処理
+            # 区間ごとの計算処理
             if not error_flag:
                 for seg_idx, seg_pts in enumerate(meter_segments):
                     seg_start = seg_pts[0]
                     seg_end = seg_pts[-1]
                     
-                    # 区間の始点または終点のどちらか一方がエリア内であれば、そのエリアの運賃ルールを適用
                     applied_rule = seg_start.get("area") or seg_end.get("area")
 
-                    # 区間の両端がともにエリア外の場合はエラー
                     if applied_rule is None:
                         error_flag = True
                         error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は始点・終点ともに営業エリア外のため計算できません。"
@@ -727,7 +735,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     "error_message": error_message if error_message else "ルート検索に失敗しました。"
                 }
             else:
-                # 3. 高速料金算出（全行程通しで計算）
+                # 高速料金算出
                 raw_toll = get_here_toll_fee_full_route(
                     points[0]["lat"], points[0]["lon"],
                     points[-1]["lat"], points[-1]["lon"],
