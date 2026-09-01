@@ -55,7 +55,6 @@ PICKUP_FEE = 300      # 迎車料金 (1乗車につき固定)
 RESERVATION_FEE = 500 # 予約料金 (選択時)
 BRIDGE_FEE = 910      # 橋代往復加算料金
 
-# 全体の上限回数設定 (1日 300 回)
 DAILY_GLOBAL_LIMIT = 300
 DB_FILE = "usage_counter.db"
 
@@ -176,14 +175,15 @@ ONE_WAY_FEATURES = load_one_way_area_geojson()
 BRIDGE_FEATURES = load_bridge_area_geojson()
 
 def find_area(lat, lon):
+    """指定座標が属するタクシー運賃エリア（area_*.geojson）を取得"""
     if lat is None or lon is None or not ALL_FEATURES:
         return None
 
-    point = Point(lon, lat)  # Point(経度, 緯度)
+    point = Point(lon, lat)  # Point(経度, 緯度) の順番
 
     for feature in ALL_FEATURES:
         polygon = shape(feature["geometry"])
-        if polygon.intersects(point) or polygon.contains(point):
+        if polygon.intersects(point) or polygon.covers(point) or polygon.contains(point):
             props = feature["properties"]
             return {
                 "name": props.get("name", "名称未設定"),
@@ -195,24 +195,21 @@ def find_area(lat, lon):
     return None
 
 def is_in_one_way_area(lat, lon):
-    """指定座標が「赤い枠（片道エリア）」の内側（または境界線上）にあるか判定"""
     if lat is None or lon is None or not ONE_WAY_FEATURES:
         return False
 
-    point = Point(lon, lat)  # Shapelyでは Point(経度, 緯度) の順番
+    point = Point(lon, lat)
     for feature in ONE_WAY_FEATURES:
         polygon = shape(feature["geometry"])
-        # intersects または covers を使用して境界線上の判定漏れを防止
         if polygon.intersects(point) or polygon.covers(point):
             return True
     return False
 
 def is_in_bridge_area(lat, lon):
-    """指定座標が「橋代往復エリア」の内側（または境界線上）にあるか判定"""
     if lat is None or lon is None or not BRIDGE_FEATURES:
         return False
 
-    point = Point(lon, lat)  # Shapelyでは Point(経度, 緯度) の順番
+    point = Point(lon, lat)
     for feature in BRIDGE_FEATURES:
         polygon = shape(feature["geometry"])
         if polygon.intersects(point) or polygon.covers(point):
@@ -268,7 +265,6 @@ def get_google_route(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=
         route = res["routes"][0]
         leg = route["legs"][0]
         distance_km = leg["distance"]["value"] / 1000.0
-
         path_coords = polyline.decode(route["overview_polyline"]["points"])
 
         return {
@@ -280,7 +276,7 @@ def get_google_route(origin_lat, origin_lon, dest_lat, dest_lon, avoid_highways=
         return None
 
 # ---------------------------------------------------------
-# HERE API 関数（一括ルート算出）
+# HERE API 関数
 # ---------------------------------------------------------
 def get_here_toll_fee_full_route(origin_lat, origin_lon, dest_lat, dest_lon, via_coords_list=None, avoid_highways=False):
     if avoid_highways:
@@ -369,7 +365,7 @@ def draw_map(points_markers=None, all_path_coords=None):
         center = [avg_lat, avg_lon]
         zoom = 11
     else:
-        center = [34.7024, 135.4959]  # 大阪駅周辺
+        center = [34.7024, 135.4959]
         zoom = 11
 
     m = folium.Map(location=center, zoom_start=zoom, tiles=None)
@@ -416,7 +412,7 @@ def draw_map(points_markers=None, all_path_coords=None):
 # ---------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------
-st.title("🚖 タクシー料金計算アプリ")
+st.title("MKタクシー料金計算アプリ")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -427,7 +423,6 @@ with col2:
     end_point = st.text_input("終点（目的地）", value=st.session_state["end_point_val"])
     st.session_state["end_point_val"] = end_point
 
-# 経由地設定
 st.markdown("### 経由地設定（最大3件）")
 col_b1, col_b2, _ = st.columns([1, 1, 2])
 with col_b1:
@@ -482,7 +477,6 @@ if use_highway:
         step=100
     )
 
-# マップ操作
 st.markdown("---")
 st.markdown("### 🗺️ マップ (クリックして地点を設定)")
 
@@ -561,15 +555,15 @@ is_disabled = today_count >= DAILY_GLOBAL_LIMIT
 st.caption(f"💡 本日の全体計算状況: あと **{max(0, remaining)}** / {DAILY_GLOBAL_LIMIT} 回 計算可能です")
 
 if is_disabled:
-    st.error("⚠️ 本日の全体利用上限（300回）に達しました。API費用保護のため、本日の計算機能は停止しています。明日（0時以降）に再度お試しください。")
+    st.error("⚠️ 本日の全体利用上限（300回）に達しました。明日（0時以降）に再度お試しください。")
 
 if st.button("料金とルートを計算する", type="primary", disabled=is_disabled):
     if GOOGLE_MAPS_API_KEY == "YOUR_GOOGLE_API_KEY" or not GOOGLE_MAPS_API_KEY:
-        st.error("Secrets またはコード内に Google Maps API Key を設定してください。")
+        st.error("API Key が設定されていません。")
     elif not start_point or not end_point:
         st.warning("始点と終点を入力してください。")
     elif any(not v["address"] for v in st.session_state["via_list"]):
-        st.warning("入力されていない経由地があります。住所を入力するか「経由地を減らす」を押してください。")
+        st.warning("入力されていない経由地があります。")
     else:
         increment_today_usage()
 
@@ -613,9 +607,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             st.session_state["end_coords"] = (e_lat, e_lon)
             points.append({"name": end_point, "lat": e_lat, "lon": e_lon, "reset_after": False, "type": "end"})
 
-            # ---------------------------------------------------------
-            # エリア内外判定のチェック（両方エリア外は計算不可）
-            # ---------------------------------------------------------
+            # 全体エリアチェック（始点・終点のどちらも赤い枠外ならエラー）
             start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
             end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
 
@@ -626,13 +618,14 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 }
                 st.rerun()
 
-            # タクシー料金ルール適用エリア判定
+            # 各地点ごとの運賃ルール（area_*.geojson）判定
+            default_rule = {"name": "標準運賃エリア", "base_fare": 500, "base_distance_m": 1000, "add_fare": 100, "add_distance_m": 250}
             for pt in points:
                 pt["area"] = find_area(pt["lat"], pt["lon"])
 
-            default_rule = {"name": "標準運賃エリア", "base_fare": 500, "base_distance_m": 1000, "add_fare": 100, "add_distance_m": 250}
-
-            # 「メーター切り直し」指定区間の分割設定
+            # ---------------------------------------------------------
+            # メーター切り直し区間の分割
+            # ---------------------------------------------------------
             meter_segments = []
             current_segment_pts = [points[0]]
 
@@ -650,16 +643,17 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             error_message = ""
             info_messages = []
             caption_messages = []
-
             here_via_coords = []
 
+            # ---------------------------------------------------------
+            # 区間ごとの運賃計算
+            # ---------------------------------------------------------
             for seg_idx, seg_pts in enumerate(meter_segments):
                 seg_start = seg_pts[0]
                 seg_end = seg_pts[-1]
                 
-                applied_rule = seg_start["area"] if seg_start["area"] else seg_end["area"]
-                if applied_rule is None:
-                    applied_rule = default_rule
+                # 始点エリアのルール優先。無ければ終点エリアのルールを取得
+                applied_rule = seg_start.get("area") or seg_end.get("area") or default_rule
 
                 seg_dist = 0.0
                 for k in range(len(seg_pts) - 1):
@@ -687,24 +681,22 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
 
                 if total_distance > 300.0:
                     error_flag = True
-                    error_message = f"走行距離が 300km ({total_distance:.1f}km) を超えているため、料金計算を行えません。"
+                    error_message = f"走行距離が 300km ({total_distance:.1f}km) を超えているため、計算できません。"
                     break
 
                 if len(meter_segments) > 1:
-                    info_messages.append(f"区間{seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) 適用エリア: **{applied_rule['name']}**")
-                    caption_messages.append(f"・区間{seg_idx + 1}: {seg_dist:.2f} km / {seg_fare:,} 円 (迎車込)")
+                    info_messages.append(f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) 適用エリア: **{applied_rule['name']}**")
+                    caption_messages.append(f"・区間 {seg_idx + 1}: {seg_dist:.2f} km / {seg_fare:,} 円 (迎車込)")
                 else:
                     info_messages.append(f"適用運賃エリア: **{applied_rule['name']}**")
 
             if error_flag:
                 st.session_state["calc_result"] = {
                     "error": True,
-                    "error_message": error_message if error_message else "指定地点のルート検索またはエリア判定に失敗しました。"
+                    "error_message": error_message if error_message else "ルート検索に失敗しました。"
                 }
             else:
-                # ---------------------------------------------------------
-                # 高速料金算出（片方がエリア外の場合のみ往復2倍）
-                # ---------------------------------------------------------
+                # 高速料金算出
                 raw_toll = get_here_toll_fee_full_route(
                     points[0]["lat"], points[0]["lon"],
                     points[-1]["lat"], points[-1]["lon"],
@@ -712,15 +704,9 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     avoid_highways=avoid_highways
                 )
 
-                # 片方のみエリア外か判定（XOR条件）
                 is_round_trip = start_in_one_way != end_in_one_way
+                api_toll_fee = raw_toll * 2 if is_round_trip else raw_toll
 
-                if is_round_trip:
-                    api_toll_fee = raw_toll * 2
-                else:
-                    api_toll_fee = raw_toll
-
-                # 橋代往復エリア判定（+910円加算）
                 start_in_bridge = is_in_bridge_area(points[0]["lat"], points[0]["lon"])
                 end_in_bridge = is_in_bridge_area(points[-1]["lat"], points[-1]["lon"])
                 has_bridge_fee = (start_in_bridge or end_in_bridge) and use_highway
@@ -753,7 +739,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
 if "calc_result" in st.session_state:
     res = st.session_state["calc_result"]
     if res.get("error"):
-        st.error(f"⛔ {res.get('error_message', '指定地点のルート検索に失敗しました。')}")
+        st.error(f"⛔ {res.get('error_message', '計算に失敗しました。')}")
     else:
         st.success("計算が完了しました！")
         
