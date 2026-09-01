@@ -626,8 +626,8 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     if i < len(points) - 1:
                         current_segment_pts = [points[i]]
 
-            # ---------------------------------------------------------
-            # 営業エリアチェック＆メーター料金計算ロジック
+# ---------------------------------------------------------
+            # 💡 営業エリアチェック＆メーター料金計算ロジック（修正版）
             # ---------------------------------------------------------
             all_path_coords = []
             total_distance = 0.0
@@ -642,24 +642,24 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             for pt in points[1:-1]:
                 here_via_coords.append((pt["lat"], pt["lon"]))
 
-            # 1. メーター切り直しがない（全区間通し）場合で、始点・終点ともにエリア外かをチェック
+            # 【チェック1】メーター切り直しがない（通し）場合：始点・終点がともにエリア外ならエラー
             if len(meter_segments) == 1:
-                seg_start = meter_segments[0][0]
-                seg_end = meter_segments[0][-1]
-                if seg_start.get("area") is None and seg_end.get("area") is None:
+                start_area = points[0].get("area")
+                end_area = points[-1].get("area")
+                if start_area is None and end_area is None:
                     error_flag = True
                     error_message = "始点および終点がともに営業エリア外のため計算できません。（メーター切り直しがない場合は、始点・終点のいずれかが営業エリア内である必要があります）"
 
-            # 2. 各メーター区間ごとの計算処理
+            # 【チェック2】各メーター区間の計算処理
             if not error_flag:
                 for seg_idx, seg_pts in enumerate(meter_segments):
                     seg_start = seg_pts[0]
                     seg_end = seg_pts[-1]
                     
-                    # 区間始点または区間終点のエリア情報を取得（エリア内のルールを採用）
+                    # 区間の始点または終点のどちらか一方がエリア内であれば、そのエリアの運賃ルールを適用
                     applied_rule = seg_start.get("area") or seg_end.get("area")
 
-                    # 区間の始点・終点が共にエリア外の場合はエラー
+                    # 区間の両端がともにエリア外の場合はエラー
                     if applied_rule is None:
                         error_flag = True
                         error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は始点・終点ともに営業エリア外のため計算できません。"
@@ -696,49 +696,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                         caption_messages.append(f"・区間 {seg_idx + 1}: {seg_dist:.2f} km / {seg_fare:,} 円 (迎車込)")
                     else:
                         info_messages.append(f"適用運賃エリア: **{applied_rule['name']}**")
-
-            if error_flag:
-                st.session_state["calc_result"] = {
-                    "error": True,
-                    "error_message": error_message if error_message else "ルート検索に失敗しました。"
-                }
-            else:
-                # 3. 高速料金算出（全行程通しで計算）
-                raw_toll = get_here_toll_fee_full_route(
-                    points[0]["lat"], points[0]["lon"],
-                    points[-1]["lat"], points[-1]["lon"],
-                    via_coords_list=here_via_coords,
-                    avoid_highways=avoid_highways
-                )
-
-                is_round_trip = start_in_one_way != end_in_one_way
-                api_toll_fee = raw_toll * 2 if is_round_trip else raw_toll
-
-                start_in_bridge = is_in_bridge_area(points[0]["lat"], points[0]["lon"])
-                end_in_bridge = is_in_bridge_area(points[-1]["lat"], points[-1]["lon"])
-                has_bridge_fee = (start_in_bridge or end_in_bridge) and use_highway
-
-                if has_bridge_fee:
-                    api_toll_fee += BRIDGE_FEE
-
-                final_toll_fee = api_toll_fee if api_toll_fee > 0 else manual_toll_fee
-                res_fee = RESERVATION_FEE if use_reservation else 0
-                grand_total = taxi_fare + res_fee + final_toll_fee
-
-                st.session_state["calc_result"] = {
-                    "error": False,
-                    "total_distance": total_distance,
-                    "taxi_fare": taxi_fare,
-                    "grand_total": grand_total,
-                    "use_reservation": use_reservation,
-                    "total_toll_fee": final_toll_fee,
-                    "is_round_trip": is_round_trip,
-                    "has_bridge_fee": has_bridge_fee,
-                    "info_messages": info_messages,
-                    "caption_messages": caption_messages,
-                    "all_path_coords": all_path_coords
-                }
-                st.rerun()
+                        
 
 # ---------------------------------------------------------
 # 結果表示
