@@ -635,18 +635,20 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             caption_messages = []
             here_via_coords = []
 
-            # 💡 メーター区間ごとにエリア判定（区間の始点または終点のどちらかがエリア内かをチェック）
+            # 💡 メーター区間ごとにエリア判定を厳密に実施
             for seg_idx, seg_pts in enumerate(meter_segments):
                 seg_start = seg_pts[0]
                 seg_end = seg_pts[-1]
                 
-                # 区間始点または区間終点のどちらかの適用エリアを取得
+                # 区間内の地点からエリアルールを取得（始点 ➔ 終点 ➔ 区間内経由地の優先順位）
                 applied_rule = seg_start.get("area") or seg_end.get("area")
+                if applied_rule is None:
+                    applied_rule = next((pt["area"] for pt in seg_pts if pt.get("area") is not None), None)
 
-                # 【重要修正】区間の始点・終点が共にエリア外の場合はエラーとして処理中断
+                # 区間内にエリア判定できる地点が1つも含まれない場合のみエラー
                 if applied_rule is None:
                     error_flag = True
-                    error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は始点・終点ともに営業エリア外のため計算できません。"
+                    error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は営業エリアが含まれないため計算できません。"
                     break
 
                 seg_dist = 0.0
