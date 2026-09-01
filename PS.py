@@ -611,17 +611,6 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             for pt in points:
                 pt["area"] = find_area(pt["lat"], pt["lon"])
 
-            # 💡 手配全体の「いずれかの地点」が営業エリア内にあるか確認し、フォールバックエリアを定義
-            global_fallback_area = next((p["area"] for p in points if p["area"] is not None), None)
-
-            # 手配全体の「すべての地点」がエリア外（None）の場合のみエラーブロック
-            if global_fallback_area is None:
-                st.session_state["calc_result"] = {
-                    "error": True,
-                    "error_message": "すべての地点が営業エリア外のため、料金計算を行えません。"
-                }
-                st.rerun()
-
             # 片道/往復の境界エリア（one_way_area.geojson）判定
             start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
             end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
@@ -646,12 +635,19 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             caption_messages = []
             here_via_coords = []
 
+            # 💡 メーター区間ごとにエリア判定（区間の始点または終点のどちらかがエリア内かをチェック）
             for seg_idx, seg_pts in enumerate(meter_segments):
                 seg_start = seg_pts[0]
                 seg_end = seg_pts[-1]
                 
-                # 区間内の始点エリア ➔ 区間内の終点エリア ➔ 手配全体の有効エリア の順で確実に取得
-                applied_rule = seg_start.get("area") or seg_end.get("area") or global_fallback_area
+                # 区間始点または区間終点のどちらかの適用エリアを取得
+                applied_rule = seg_start.get("area") or seg_end.get("area")
+
+                # 【重要修正】区間の始点・終点が共にエリア外の場合はエラーとして処理中断
+                if applied_rule is None:
+                    error_flag = True
+                    error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は始点・終点ともに営業エリア外のため計算できません。"
+                    break
 
                 seg_dist = 0.0
                 for k in range(len(seg_pts) - 1):
