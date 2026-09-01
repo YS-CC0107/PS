@@ -194,7 +194,7 @@ def find_area(lat, lon):
                 "add_distance_m": int(props.get("add_distance_m", 250))
             }
 
-    # 2. 境界線付近のバッファ判定 (約100mのゆとり)
+    # 2. 境界線付近のバッファ判定 (約100mのゆとりを設けて境界ズレを吸収)
     buffered_point = point.buffer(0.001)
     for feature in ALL_FEATURES:
         polygon = shape(feature["geometry"])
@@ -452,13 +452,14 @@ with col_b2:
             st.session_state["via_list"].pop()
             st.rerun()
 
-for idx, via_item in enumerate(st.session_state["via_list"]):
+# 💡 状態の非同期ブレを防ぐためセッション管理構造を改善
+for idx in range(len(st.session_state["via_list"])):
     col_v1, col_v2 = st.columns([2, 1])
     with col_v1:
         v_address = st.text_input(
             f"経由地 {idx + 1} の場所",
-            value=via_item["address"],
-            key=f"via_address_{idx}"
+            value=st.session_state["via_list"][idx]["address"],
+            key=f"via_address_input_{idx}"
         )
         st.session_state["via_list"][idx]["address"] = v_address
     with col_v2:
@@ -466,8 +467,8 @@ for idx, via_item in enumerate(st.session_state["via_list"]):
         st.write("")
         v_reset = st.checkbox(
             f"経由地 {idx + 1} でメーター切り直し",
-            value=via_item["reset_meter"],
-            key=f"via_reset_{idx}"
+            value=st.session_state["via_list"][idx]["reset_meter"],
+            key=f"via_reset_check_{idx}"
         )
         st.session_state["via_list"][idx]["reset_meter"] = v_reset
 
@@ -632,7 +633,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
 
             # ---------------------------------------------------------
-            # 💡 メーター切り直し区間の正確な分割ロジック（修正済）
+            # 💡 メーター切り直し区間の正確な分割ロジック
             # ---------------------------------------------------------
             meter_segments = []
             curr_seg = [points[0]]
