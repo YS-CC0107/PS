@@ -644,23 +644,23 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
 
             # ---------------------------------------------------------
-            # 💡 メーター切り直し区間の明確な分割処理
+            # 💡 メーター切り直し区間の分割処理
             # ---------------------------------------------------------
             meter_segments = []
             curr_seg = [points[0]]
 
             for pt in points[1:]:
                 curr_seg.append(pt)
-                # 一つ前の地点で切り直しがオンになっている場合、ここで区間を区切る
+                # 一つ前の地点で「メーター切り直し」が有効な場合、ここで区間を切る
                 if curr_seg[-2].get("reset_after"):
                     meter_segments.append(curr_seg)
                     curr_seg = [pt]
 
-            if len(curr_seg) > 1 or not meter_segments:
+            if len(curr_seg) > 1:
                 meter_segments.append(curr_seg)
 
             # ---------------------------------------------------------
-            # 💡 エリア判定 ＆ 料金計算処理（再構築部分）
+            # 💡 エリア判定 ＆ 料金計算処理（全区間計算保証）
             # ---------------------------------------------------------
             all_path_coords = []
             total_distance = 0.0
@@ -678,17 +678,18 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 seg_start = seg_pts[0]
                 seg_end = seg_pts[-1]
                 
-                # 区間内の全地点のエリアリストを取得
-                seg_areas = [p["area"] for p in seg_pts if p.get("area") is not None]
+                # 区間内のすべての地点からエリア情報を探す
+                applied_rule = None
+                for p in seg_pts:
+                    if p.get("area") is not None:
+                        applied_rule = p["area"]
+                        break
 
-                # 【重要仕様1】区間内のすべての地点がエリア外（None）の場合は計算不可
-                if len(seg_areas) == 0:
+                # 【仕様】区間内に1つもエリアが存在しない場合（完全なエリア外 ➔ エリア外）のみエラー
+                if applied_rule is None:
                     error_flag = True
-                    error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は、発着点および経由地がすべて営業エリア外のため計算できません。"
+                    error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は、すべての地点が営業エリア外のため計算できません。"
                     break
-
-                # 【重要仕様2】区間内に1つでもエリアが存在すれば、最初に見つかったエリアのルールを適用
-                applied_rule = seg_areas[0]
 
                 # Google Directions API でルート検索
                 seg_dist = 0.0
