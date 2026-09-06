@@ -453,18 +453,19 @@ with col_b2:
             st.rerun()
 
 via_inputs = []
-# 重複エラー(StreamlitWidgetAlreadyInstantiatedError)を防ぐため、一意のkey文字列を生成
 for idx in range(st.session_state["via_count"]):
     col_v1, col_v2 = st.columns([2, 1])
     addr_key = f"via_address_input_{idx}"
     check_key = f"via_reset_check_box_{idx}"
     
     with col_v1:
-        v_addr = st.text_input(f"経由地 {idx + 1} の場所", key=addr_key)
+        # Stateに保持されている場合はその値を標準初期値に適用
+        default_addr = st.session_state.get(addr_key, "")
+        v_addr = st.text_input(f"経由地 {idx + 1} の場所", value=default_addr, key=addr_key)
     with col_v2:
         st.write("")
         st.write("")
-        v_reset = st.checkbox(f"経由地 {idx + 1} でメーター切り直し", key=check_key, value=True)
+        v_reset = st.checkbox(f"経由地 {idx + 1} でメーター切り直し", key=check_key, value=False)
     via_inputs.append({"address": v_addr, "reset_meter": v_reset})
 
 st.markdown("### 料金オプション設定")
@@ -583,7 +584,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 st.error("始点の位置情報が取得できませんでした。")
                 st.stop()
             st.session_state["start_coords"] = (s_lat, s_lon)
-            points.append({"name": start_point, "lat": s_lat, "lon": s_lon, "reset_after": False, "type": "start"})
+            points.append({"name": start_point, "lat": s_lat, "lon": s_lon, "type": "start"})
 
             # 2. 経由地座標取得
             via_error = False
@@ -610,7 +611,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 st.error("終点の位置情報が取得できませんでした。")
                 st.stop()
             st.session_state["end_coords"] = (e_lat, e_lon)
-            points.append({"name": end_point, "lat": e_lat, "lon": e_lon, "reset_after": False, "type": "end"})
+            points.append({"name": end_point, "lat": e_lat, "lon": e_lon, "type": "end"})
 
             # 各地点の営業エリア判定
             for pt in points:
@@ -657,7 +658,8 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     curr_pts.append(points[i + 1])
                     curr_leg_dists.append(leg_distances[i])
 
-                    if points[i + 1].get("type") == "via" and via_inputs[i]["reset_meter"]:
+                    # 経由地で「メーター切り直し」を行う場合のみ区間を分割する
+                    if points[i + 1].get("type") == "via" and points[i + 1].get("reset_after", False):
                         meter_segments.append({
                             "points": curr_pts,
                             "leg_distances": curr_leg_dists
@@ -677,12 +679,14 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     seg_start = seg_pts[0]
                     seg_end = seg_pts[-1]
 
+                    # 区間内のいずれかの地点が営業エリア内であればその運賃ルールを適用
                     applied_rule = None
                     for p in seg_pts:
                         if p.get("area") is not None:
                             applied_rule = p["area"]
                             break
 
+                    # 全地点がエリア外（エリア外➔エリア外）の場合のみバリデーションエラー
                     if applied_rule is None:
                         error_flag = True
                         error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は、すべての地点が営業エリア外のため計算できません。"
