@@ -438,7 +438,7 @@ def update_via_reset(idx):
 # ---------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------
-st.title("🚖 タクシー料金計算アプリ (Google Maps × HERE API 版)")
+st.title("MKタクシー料金計算アプリ")
 
 col1, col2 = st.columns(2)
 with col1:
