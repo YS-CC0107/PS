@@ -678,23 +678,34 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     seg_start = seg_pts[0]
                     seg_end = seg_pts[-1]
 
-                    # 区間内の地点から営業エリア（運賃ルール）を取得
-                    # メーター切り直し無しの場合は全行程の全地点から検索
-                    # メーター切り直し有しの場合は各分割区間内の地点から検索
                     applied_rule = None
-                    for p in seg_pts:
-                        if p.get("area") is not None:
-                            applied_rule = p["area"]
-                            break
 
-                    # 当該区間（または全区間）の全ての地点がエリア外の場合はエラーとする
-                    if applied_rule is None:
-                        error_flag = True
-                        if len(meter_segments) == 1:
-                            error_message = "全地点（始点・経由地・終点）が営業エリア外のため計算できません。"
-                        else:
+                    # --- エリア判定のロジック（修正点） ---
+                    if len(meter_segments) == 1:
+                        # 【パターン1】メーター切り直し「無」（通し走行）の場合
+                        # 始点または終点のエリアを取得（始点優先）
+                        start_area = seg_start.get("area")
+                        end_area = seg_end.get("area")
+                        applied_rule = start_area if start_area is not None else end_area
+
+                        # 始点と終点の両方がエリア外の場合はエラー（経由地がエリア内でも無効）
+                        if applied_rule is None:
+                            error_flag = True
+                            error_message = "始点と終点の両方が営業エリア外のため計算できません。"
+                            break
+                    else:
+                        # 【パターン2】メーター切り直し「有」（分割区間）の場合
+                        # 区間内のいずれかの地点のエリアを取得
+                        for p in seg_pts:
+                            if p.get("area") is not None:
+                                applied_rule = p["area"]
+                                break
+
+                        # 区間内の全地点（始点・経由地・終点）がエリア外の場合はエラー
+                        if applied_rule is None:
+                            error_flag = True
                             error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は、すべての地点が営業エリア外のため計算できません。"
-                        break
+                            break
 
                     is_first_segment = (seg_idx == 0)
                     seg_fare = calculate_segment_fare(seg_dist, applied_rule, is_night, include_pickup=is_first_segment)
