@@ -194,7 +194,7 @@ def find_area(lat, lon):
                 "add_distance_m": int(props.get("add_distance_m", 250))
             }
 
-    # 2. 境界線付近のバッファ判定 (約100mのゆとりを設けて境界ズレを吸収)
+    # 2. 境界線付近のバッファ判定
     buffered_point = point.buffer(0.001)
     for feature in ALL_FEATURES:
         polygon = shape(feature["geometry"])
@@ -336,7 +336,7 @@ def get_here_toll_fee_full_route(origin_lat, origin_lon, dest_lat, dest_lon, via
         return 0
 
 # ---------------------------------------------------------
-# タクシー料金計算ロジック（迎車料金は第1区間のみ加算）
+# タクシー料金計算ロジック
 # ---------------------------------------------------------
 def calculate_segment_fare(distance_km, rule, is_night, include_pickup=True):
     if distance_km is None or distance_km == 0:
@@ -368,7 +368,6 @@ def calculate_segment_fare(distance_km, rule, is_night, include_pickup=True):
     if is_night:
         raw_fare *= 1.2
 
-    # 迎車料金（300円）は最初の区間（include_pickup=True）のみ加算
     total_segment_fare = raw_fare + (PICKUP_FEE if include_pickup else 0)
     return int(math.ceil(total_segment_fare / 10) * 10)
 
@@ -454,15 +453,18 @@ with col_b2:
             st.rerun()
 
 via_inputs = []
+# 重複エラー(StreamlitWidgetAlreadyInstantiatedError)を防ぐため、一意のkey文字列を生成
 for idx in range(st.session_state["via_count"]):
     col_v1, col_v2 = st.columns([2, 1])
+    addr_key = f"via_address_input_{idx}"
+    check_key = f"via_reset_check_box_{idx}"
+    
     with col_v1:
-        v_addr = st.text_input(f"経由地 {idx + 1} の場所", key=f"via_address_{idx}")
+        v_addr = st.text_input(f"経由地 {idx + 1} の場所", key=addr_key)
     with col_v2:
         st.write("")
         st.write("")
-        # デフォルトで「切り直し」チェックボックスはオン
-        v_reset = st.checkbox(f"経由地 {idx + 1} でメーター切り直し", key=f"via_reset_check_{idx}", value=True)
+        v_reset = st.checkbox(f"経由地 {idx + 1} でメーター切り直し", key=check_key, value=True)
     via_inputs.append({"address": v_addr, "reset_meter": v_reset})
 
 st.markdown("### 料金オプション設定")
@@ -543,7 +545,7 @@ if clicked_point:
                 else:
                     for idx in range(st.session_state["via_count"]):
                         if click_target == f"経由地{idx + 1}に設定":
-                            st.session_state[f"via_address_{idx}"] = address
+                            st.session_state[f"via_address_input_{idx}"] = address
                 
                 st.rerun()
 
@@ -608,7 +610,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 st.error("終点の位置情報が取得できませんでした。")
                 st.stop()
             st.session_state["end_coords"] = (e_lat, e_lon)
-            points.append({"name": end_point, "lat": e_lon, "lon": e_lon, "reset_after": False, "type": "end"})
+            points.append({"name": end_point, "lat": e_lat, "lon": e_lon, "reset_after": False, "type": "end"})
 
             # 各地点の営業エリア判定
             for pt in points:
@@ -668,27 +670,24 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                             "leg_distances": curr_leg_dists
                         })
 
-                # 各グループ区間ごとの運賃算出（迎車料は最初の区間のみ加算）
+                # 各グループ区間ごとの運賃算出
                 for seg_idx, seg in enumerate(meter_segments):
                     seg_pts = seg["points"]
                     seg_dist = sum(seg["leg_distances"])
                     seg_start = seg_pts[0]
                     seg_end = seg_pts[-1]
 
-                    # 該当区間内のいずれかの地点が営業エリア内であればその運賃体系を適用
                     applied_rule = None
                     for p in seg_pts:
                         if p.get("area") is not None:
                             applied_rule = p["area"]
                             break
 
-                    # 💡 修正ポイント：区間内の全ての地点がエリア外（エリア外➔エリア外）の場合のみエラー
                     if applied_rule is None:
                         error_flag = True
                         error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は、すべての地点が営業エリア外のため計算できません。"
                         break
 
-                    # 1区間目(seg_idx == 0)のみ迎車料金を含める
                     is_first_segment = (seg_idx == 0)
                     seg_fare = calculate_segment_fare(seg_dist, applied_rule, is_night, include_pickup=is_first_segment)
 
