@@ -51,7 +51,7 @@ if not check_password():
 GOOGLE_MAPS_API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "YOUR_GOOGLE_API_KEY")
 HERE_API_KEY = st.secrets.get("HERE_API_KEY", "YOUR_HERE_API_KEY")
 
-PICKUP_FEE = 300      # 迎車料金 (1乗車につき固定)
+PICKUP_FEE = 300      # 迎車料金 (1乗車目のみ加算)
 RESERVATION_FEE = 500 # 予約料金 (選択時)
 BRIDGE_FEE = 910      # 橋代往復加算料金
 
@@ -336,9 +336,9 @@ def get_here_toll_fee_full_route(origin_lat, origin_lon, dest_lat, dest_lon, via
         return 0
 
 # ---------------------------------------------------------
-# タクシー料金計算ロジック
+# タクシー料金計算ロジック（迎車料金は第1区間のみ加算）
 # ---------------------------------------------------------
-def calculate_segment_fare(distance_km, rule, is_night):
+def calculate_segment_fare(distance_km, rule, is_night, include_pickup=True):
     if distance_km is None or distance_km == 0:
         return 0
 
@@ -368,7 +368,8 @@ def calculate_segment_fare(distance_km, rule, is_night):
     if is_night:
         raw_fare *= 1.2
 
-    total_segment_fare = raw_fare + PICKUP_FEE
+    # 迎車料金（300円）は最初の区間（include_pickup=True）のみ加算
+    total_segment_fare = raw_fare + (PICKUP_FEE if include_pickup else 0)
     return int(math.ceil(total_segment_fare / 10) * 10)
 
 # ---------------------------------------------------------
@@ -460,7 +461,8 @@ for idx in range(st.session_state["via_count"]):
     with col_v2:
         st.write("")
         st.write("")
-        v_reset = st.checkbox(f"経由地 {idx + 1} でメーター切り直し", key=f"via_reset_check_{idx}")
+        # デフォルトで「切り直し」チェックボックスはオン
+        v_reset = st.checkbox(f"経由地 {idx + 1} でメーター切り直し", key=f"via_reset_check_{idx}", value=True)
     via_inputs.append({"address": v_addr, "reset_meter": v_reset})
 
 st.markdown("### 料金オプション設定")
@@ -593,7 +595,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     "name": via_item["address"],
                     "lat": v_lat,
                     "lon": v_lon,
-                    "reset_after": via_item["reset_meter"], # 確実に画面のチェック状態を反映
+                    "reset_after": via_item["reset_meter"],
                     "type": "via"
                 })
 
@@ -606,7 +608,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 st.error("終点の位置情報が取得できませんでした。")
                 st.stop()
             st.session_state["end_coords"] = (e_lat, e_lon)
-            points.append({"name": end_point, "lat": e_lat, "lon": e_lon, "reset_after": False, "type": "end"})
+            points.append({"name": end_point, "lat": e_lon, "lon": e_lon, "reset_after": False, "type": "end"})
 
             # 各地点の営業エリア判定
             for pt in points:
@@ -653,7 +655,6 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     curr_pts.append(points[i + 1])
                     curr_leg_dists.append(leg_distances[i])
 
-                    # メーター切り直しチェックが入っている、または最後の区間の場合は区間区切り
                     if points[i + 1].get("type") == "via" and via_inputs[i]["reset_meter"]:
                         meter_segments.append({
                             "points": curr_pts,
@@ -667,25 +668,29 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                             "leg_distances": curr_leg_dists
                         })
 
-                # 各グループ区間ごとの運賃算出
+                # 各グループ区間ごとの運賃算出（迎車料は最初の区間のみ加算）
                 for seg_idx, seg in enumerate(meter_segments):
                     seg_pts = seg["points"]
                     seg_dist = sum(seg["leg_distances"])
                     seg_start = seg_pts[0]
                     seg_end = seg_pts[-1]
 
+                    # 該当区間内のいずれかの地点が営業エリア内であればその運賃体系を適用
                     applied_rule = None
                     for p in seg_pts:
                         if p.get("area") is not None:
                             applied_rule = p["area"]
                             break
 
+                    # 💡 修正ポイント：区間内の全ての地点がエリア外（エリア外➔エリア外）の場合のみエラー
                     if applied_rule is None:
                         error_flag = True
                         error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は、すべての地点が営業エリア外のため計算できません。"
                         break
 
-                    seg_fare = calculate_segment_fare(seg_dist, applied_rule, is_night)
+                    # 1区間目(seg_idx == 0)のみ迎車料金を含める
+                    is_first_segment = (seg_idx == 0)
+                    seg_fare = calculate_segment_fare(seg_dist, applied_rule, is_night, include_pickup=is_first_segment)
 
                     total_distance += seg_dist
                     taxi_fare += seg_fare
@@ -695,9 +700,10 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                         error_message = f"走行距離が 300km ({total_distance:.1f}km) を超えているため、計算できません。"
                         break
 
+                    pickup_note = " (迎車込)" if is_first_segment else ""
                     if len(meter_segments) > 1:
                         info_messages.append(f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) 適用エリア: **{applied_rule['name']}**")
-                        caption_messages.append(f"・区間 {seg_idx + 1}: {seg_dist:.2f} km / {seg_fare:,} 円 (迎車込)")
+                        caption_messages.append(f"・区間 {seg_idx + 1}: {seg_dist:.2f} km / {seg_fare:,} 円{pickup_note}")
                     else:
                         info_messages.append(f"適用運賃エリア: **{applied_rule['name']}**")
 
