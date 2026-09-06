@@ -104,8 +104,8 @@ if "start_point_val" not in st.session_state:
 if "end_point_val" not in st.session_state:
     st.session_state["end_point_val"] = ""
 
-if "via_list" not in st.session_state:
-    st.session_state["via_list"] = []
+if "via_count" not in st.session_state:
+    st.session_state["via_count"] = 0
 
 if "start_coords" not in st.session_state:
     st.session_state["start_coords"] = None
@@ -426,16 +426,6 @@ def draw_map(points_markers=None, all_path_coords=None):
     return m
 
 # ---------------------------------------------------------
-# 経由地入力の即時同期用コールバック関数
-# ---------------------------------------------------------
-def update_via_address(idx):
-    st.session_state["via_list"][idx]["address"] = st.session_state[f"via_address_input_{idx}"]
-    st.session_state["via_list"][idx]["coords"] = None
-
-def update_via_reset(idx):
-    st.session_state["via_list"][idx]["reset_meter"] = st.session_state[f"via_reset_check_{idx}"]
-
-# ---------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------
 st.title("MKタクシー料金計算アプリ")
@@ -452,36 +442,26 @@ with col2:
 st.markdown("### 経由地設定（最大3件）")
 col_b1, col_b2, _ = st.columns([1, 1, 2])
 with col_b1:
-    if len(st.session_state["via_list"]) < 3:
+    if st.session_state["via_count"] < 3:
         if st.button("➕ 経由地を追加する"):
-            st.session_state["via_list"].append({"address": "", "reset_meter": False, "coords": None})
+            st.session_state["via_count"] += 1
             st.rerun()
 with col_b2:
-    if len(st.session_state["via_list"]) > 0:
+    if st.session_state["via_count"] > 0:
         if st.button("🗑️ 経由地を減らす"):
-            st.session_state["via_list"].pop()
+            st.session_state["via_count"] -= 1
             st.rerun()
 
-for idx in range(len(st.session_state["via_list"])):
+via_inputs = []
+for idx in range(st.session_state["via_count"]):
     col_v1, col_v2 = st.columns([2, 1])
     with col_v1:
-        st.text_input(
-            f"経由地 {idx + 1} の場所",
-            value=st.session_state["via_list"][idx]["address"],
-            key=f"via_address_input_{idx}",
-            on_change=update_via_address,
-            args=(idx,)
-        )
+        v_addr = st.text_input(f"経由地 {idx + 1} の場所", key=f"via_address_{idx}")
     with col_v2:
         st.write("")
         st.write("")
-        st.checkbox(
-            f"経由地 {idx + 1} でメーター切り直し",
-            value=st.session_state["via_list"][idx]["reset_meter"],
-            key=f"via_reset_check_{idx}",
-            on_change=update_via_reset,
-            args=(idx,)
-        )
+        v_reset = st.checkbox(f"経由地 {idx + 1} でメーター切り直し", key=f"via_reset_check_{idx}")
+    via_inputs.append({"address": v_addr, "reset_meter": v_reset})
 
 st.markdown("### 料金オプション設定")
 col_opt1, col_opt2, col_opt3 = st.columns(3)
@@ -509,7 +489,7 @@ st.markdown("---")
 st.markdown("### 🗺️ マップ (クリックして地点を設定)")
 
 click_target_options = ["始点に設定"]
-for idx in range(len(st.session_state["via_list"])):
+for idx in range(st.session_state["via_count"]):
     click_target_options.append(f"経由地{idx + 1}に設定")
 click_target_options.append("終点に設定")
 
@@ -519,11 +499,6 @@ current_markers = []
 if st.session_state["start_coords"]:
     lat, lon = st.session_state["start_coords"]
     current_markers.append((lat, lon, f"始点: {st.session_state['start_point_val']}", "green"))
-
-for idx, via_item in enumerate(st.session_state["via_list"]):
-    if via_item.get("coords"):
-        lat, lon = via_item["coords"]
-        current_markers.append((lat, lon, f"経由地{idx + 1}: {via_item['address']}", "orange"))
 
 if st.session_state["end_coords"]:
     lat, lon = st.session_state["end_coords"]
@@ -564,10 +539,9 @@ if clicked_point:
                     st.session_state["end_point_val"] = address
                     st.session_state["end_coords"] = (clicked_lat, clicked_lng)
                 else:
-                    for idx in range(len(st.session_state["via_list"])):
+                    for idx in range(st.session_state["via_count"]):
                         if click_target == f"経由地{idx + 1}に設定":
-                            st.session_state["via_list"][idx]["address"] = address
-                            st.session_state["via_list"][idx]["coords"] = (clicked_lat, clicked_lng)
+                            st.session_state[f"via_address_{idx}"] = address
                 
                 st.rerun()
 
@@ -590,7 +564,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
         st.error("API Key が設定されていません。")
     elif not start_point or not end_point:
         st.warning("始点と終点を入力してください。")
-    elif any(not v["address"] for v in st.session_state["via_list"]):
+    elif any(not v["address"] for v in via_inputs):
         st.warning("入力されていない経由地があります。")
     else:
         increment_today_usage()
@@ -609,18 +583,17 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
 
             # 2. 経由地座標取得
             via_error = False
-            for idx, via_item in enumerate(st.session_state["via_list"]):
+            for idx, via_item in enumerate(via_inputs):
                 v_lat, v_lon = get_coordinates_google(via_item["address"])
                 if v_lat is None:
                     st.error(f"経由地 {idx + 1} の位置情報が取得できませんでした。")
                     via_error = True
                     break
-                st.session_state["via_list"][idx]["coords"] = (v_lat, v_lon)
                 points.append({
                     "name": via_item["address"],
                     "lat": v_lat,
                     "lon": v_lon,
-                    "reset_after": via_item["reset_meter"],
+                    "reset_after": via_item["reset_meter"], # 確実に画面のチェック状態を反映
                     "type": "via"
                 })
 
@@ -635,17 +608,14 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             st.session_state["end_coords"] = (e_lat, e_lon)
             points.append({"name": end_point, "lat": e_lat, "lon": e_lon, "reset_after": False, "type": "end"})
 
-            # 各地点の営業エリア判定 (エリア外なら None)
+            # 各地点の営業エリア判定
             for pt in points:
                 pt["area"] = find_area(pt["lat"], pt["lon"])
 
-            # 境界エリア（one_way_area / bridge_area）判定
+            # 境界エリア判定
             start_in_one_way = is_in_one_way_area(points[0]["lat"], points[0]["lon"])
             end_in_one_way = is_in_one_way_area(points[-1]["lat"], points[-1]["lon"])
 
-            # ---------------------------------------------------------
-            # 💡 修正ポイント：経由地を含めた正しい区間分割＆料金計算処理
-            # ---------------------------------------------------------
             all_path_coords = []
             total_distance = 0.0
             taxi_fare = 0
@@ -658,7 +628,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             for pt in points[1:-1]:
                 here_via_coords.append((pt["lat"], pt["lon"]))
 
-            # 地点間（Point A -> Point B）ごとに個別のルートと距離を算出
+            # 地点間ごとの個別距離を取得
             leg_distances = []
             for i in range(len(points) - 1):
                 p1 = points[i]
@@ -674,7 +644,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                 all_path_coords.append(route_info["path_coords"])
 
             if not error_flag:
-                # 区間のグループ化（「メーター切り直し」チェックに応じてまとめ）
+                # 区間をメーター切り直し地点ごとにグループ化
                 meter_segments = []
                 curr_leg_dists = []
                 curr_pts = [points[0]]
@@ -683,16 +653,21 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     curr_pts.append(points[i + 1])
                     curr_leg_dists.append(leg_distances[i])
 
-                    # 該当地点の後に「メーター切り直し」があるか、または最終目的地の時に区間を確定
-                    if points[i].get("reset_after") or i == len(points) - 2:
+                    # メーター切り直しチェックが入っている、または最後の区間の場合は区間区切り
+                    if points[i + 1].get("type") == "via" and via_inputs[i]["reset_meter"]:
                         meter_segments.append({
                             "points": curr_pts,
                             "leg_distances": curr_leg_dists
                         })
                         curr_pts = [points[i + 1]]
                         curr_leg_dists = []
+                    elif i == len(points) - 2:
+                        meter_segments.append({
+                            "points": curr_pts,
+                            "leg_distances": curr_leg_dists
+                        })
 
-                # 各区間の料金計算
+                # 各グループ区間ごとの運賃算出
                 for seg_idx, seg in enumerate(meter_segments):
                     seg_pts = seg["points"]
                     seg_dist = sum(seg["leg_distances"])
@@ -732,7 +707,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     "error_message": error_message if error_message else "ルート検索に失敗しました。"
                 }
             else:
-                # 高速料金算出（全行程通し・既存機能維持）
+                # 高速料金算出（HERE API）
                 raw_toll = get_here_toll_fee_full_route(
                     points[0]["lat"], points[0]["lon"],
                     points[-1]["lat"], points[-1]["lon"],
