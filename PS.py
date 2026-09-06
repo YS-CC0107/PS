@@ -459,7 +459,6 @@ for idx in range(st.session_state["via_count"]):
     check_key = f"via_reset_check_box_{idx}"
     
     with col_v1:
-        # Stateに保持されている場合はその値を標準初期値に適用
         default_addr = st.session_state.get(addr_key, "")
         v_addr = st.text_input(f"経由地 {idx + 1} の場所", value=default_addr, key=addr_key)
     with col_v2:
@@ -679,17 +678,22 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     seg_start = seg_pts[0]
                     seg_end = seg_pts[-1]
 
-                    # 区間内のいずれかの地点が営業エリア内であればその運賃ルールを適用
+                    # 区間内の地点から営業エリア（運賃ルール）を取得
+                    # メーター切り直し無しの場合は全行程の全地点から検索
+                    # メーター切り直し有しの場合は各分割区間内の地点から検索
                     applied_rule = None
                     for p in seg_pts:
                         if p.get("area") is not None:
                             applied_rule = p["area"]
                             break
 
-                    # 全地点がエリア外（エリア外➔エリア外）の場合のみバリデーションエラー
+                    # 当該区間（または全区間）の全ての地点がエリア外の場合はエラーとする
                     if applied_rule is None:
                         error_flag = True
-                        error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は、すべての地点が営業エリア外のため計算できません。"
+                        if len(meter_segments) == 1:
+                            error_message = "全地点（始点・経由地・終点）が営業エリア外のため計算できません。"
+                        else:
+                            error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は、すべての地点が営業エリア外のため計算できません。"
                         break
 
                     is_first_segment = (seg_idx == 0)
