@@ -51,9 +51,9 @@ if not check_password():
 GOOGLE_MAPS_API_KEY = st.secrets.get("GOOGLE_MAPS_API_KEY", "YOUR_GOOGLE_API_KEY")
 HERE_API_KEY = st.secrets.get("HERE_API_KEY", "YOUR_HERE_API_KEY")
 
-PICKUP_FEE = 300      # 迎車料金 (1乗車目のみ加算)
-RESERVATION_FEE = 500 # 予約料金 (選択時)
-BRIDGE_FEE = 910      # 橋代往復加算料金
+PICKUP_FEE = 300               # 迎車料金 (1乗車目のみ加算)
+DEFAULT_RESERVATION_FEE = 500 # 予約料金 (GeoJSON側で未指定の場合のデフォルト値)
+BRIDGE_FEE = 910               # 橋代往復加算料金
 
 DAILY_GLOBAL_LIMIT = 300
 DB_FILE = "usage_counter.db"
@@ -191,7 +191,8 @@ def find_area(lat, lon):
                 "base_fare": int(props.get("base_fare", 500)),
                 "base_distance_m": int(props.get("base_distance_m", 1000)),
                 "add_fare": int(props.get("add_fare", 100)),
-                "add_distance_m": int(props.get("add_distance_m", 250))
+                "add_distance_m": int(props.get("add_distance_m", 250)),
+                "reservation_fee": int(props.get("reservation_fee", DEFAULT_RESERVATION_FEE)) # Area別の予約料金を取得
             }
 
     # 2. 境界線付近のバッファ判定
@@ -205,7 +206,8 @@ def find_area(lat, lon):
                 "base_fare": int(props.get("base_fare", 500)),
                 "base_distance_m": int(props.get("base_distance_m", 1000)),
                 "add_fare": int(props.get("add_fare", 100)),
-                "add_distance_m": int(props.get("add_distance_m", 250))
+                "add_distance_m": int(props.get("add_distance_m", 250)),
+                "reservation_fee": int(props.get("reservation_fee", DEFAULT_RESERVATION_FEE)) # Area別の予約料金を取得
             }
 
     return None
@@ -470,7 +472,7 @@ for idx in range(st.session_state["via_count"]):
 st.markdown("### 料金オプション設定")
 col_opt1, col_opt2, col_opt3 = st.columns(3)
 with col_opt1:
-    use_reservation = st.checkbox("予約を行う (+500円)")
+    use_reservation = st.checkbox("予約を行う")
 with col_opt2:
     is_night = st.checkbox("深夜割増 (22:00〜5:00 / 2割増)")
 with col_opt3:
@@ -623,6 +625,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             all_path_coords = []
             total_distance = 0.0
             taxi_fare = 0
+            first_segment_rule = None # 1乗車目のルールを記憶（予約料金適用のため）
             error_flag = False
             error_message = ""
             info_messages = []
@@ -680,34 +683,33 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
 
                     applied_rule = None
 
-                    # --- エリア判定のロジック（修正点） ---
+                    # --- エリア判定のロジック ---
                     if len(meter_segments) == 1:
-                        # 【パターン1】メーター切り直し「無」（通し走行）の場合
-                        # 始点または終点のエリアを取得（始点優先）
+                        # メーター切り直し「無」の場合
                         start_area = seg_start.get("area")
                         end_area = seg_end.get("area")
                         applied_rule = start_area if start_area is not None else end_area
 
-                        # 始点と終点の両方がエリア外の場合はエラー（経由地がエリア内でも無効）
                         if applied_rule is None:
                             error_flag = True
                             error_message = "始点と終点の両方が営業エリア外のため計算できません。"
                             break
                     else:
-                        # 【パターン2】メーター切り直し「有」（分割区間）の場合
-                        # 区間内のいずれかの地点のエリアを取得
+                        # メーター切り直し「有」の場合
                         for p in seg_pts:
                             if p.get("area") is not None:
                                 applied_rule = p["area"]
                                 break
 
-                        # 区間内の全地点（始点・経由地・終点）がエリア外の場合はエラー
                         if applied_rule is None:
                             error_flag = True
                             error_message = f"区間 {seg_idx + 1} ({seg_start['name']} ➔ {seg_end['name']}) は、すべての地点が営業エリア外のため計算できません。"
                             break
 
                     is_first_segment = (seg_idx == 0)
+                    if is_first_segment:
+                        first_segment_rule = applied_rule
+
                     seg_fare = calculate_segment_fare(seg_dist, applied_rule, is_night, include_pickup=is_first_segment)
 
                     total_distance += seg_dist
@@ -750,8 +752,16 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     api_toll_fee += BRIDGE_FEE
 
                 final_toll_fee = api_toll_fee if api_toll_fee > 0 else manual_toll_fee
-                res_fee = RESERVATION_FEE if use_reservation else 0
-                grand_total = taxi_fare + res_fee + final_toll_fee
+                
+                # --- エリア別予約料金の計算 ---
+                applied_res_fee = 0
+                if use_reservation:
+                    if first_segment_rule and "reservation_fee" in first_segment_rule:
+                        applied_res_fee = first_segment_rule["reservation_fee"]
+                    else:
+                        applied_res_fee = DEFAULT_RESERVATION_FEE
+
+                grand_total = taxi_fare + applied_res_fee + final_toll_fee
 
                 st.session_state["calc_result"] = {
                     "error": False,
@@ -759,6 +769,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     "taxi_fare": taxi_fare,
                     "grand_total": grand_total,
                     "use_reservation": use_reservation,
+                    "applied_res_fee": applied_res_fee,
                     "total_toll_fee": final_toll_fee,
                     "is_round_trip": is_round_trip,
                     "has_bridge_fee": has_bridge_fee,
@@ -810,7 +821,7 @@ if "calc_result" in st.session_state:
 
         details = [f"タクシー運賃(迎車込): {res['taxi_fare']:,}円"]
         if res["use_reservation"]:
-            details.append(f"予約料金: {RESERVATION_FEE}円")
+            details.append(f"予約料金: {res['applied_res_fee']:,}円")
         if has_toll:
             details.append(f"{toll_label}: {res['total_toll_fee']:,}円")
         
