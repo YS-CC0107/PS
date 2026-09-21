@@ -174,6 +174,23 @@ ALL_FEATURES = load_all_area_geojsons()
 ONE_WAY_FEATURES = load_one_way_area_geojson()
 BRIDGE_FEATURES = load_bridge_area_geojson()
 
+def parse_area_properties(props):
+    """GeoJSONのpropertiesから安全に運賃・予約料金プロパティを取得"""
+    res_fee = props.get("reservation_fee")
+    if res_fee is None or res_fee == "":
+        res_fee = DEFAULT_RESERVATION_FEE
+    else:
+        res_fee = int(res_fee)
+
+    return {
+        "name": props.get("name", "名称未設定"),
+        "base_fare": int(props.get("base_fare", 500)),
+        "base_distance_m": int(props.get("base_distance_m", 1000)),
+        "add_fare": int(props.get("add_fare", 100)),
+        "add_distance_m": int(props.get("add_distance_m", 250)),
+        "reservation_fee": res_fee
+    }
+
 def find_area(lat, lon):
     """指定座標が属するタクシー運賃エリア（area_*.geojson）を取得"""
     if lat is None or lon is None or not ALL_FEATURES:
@@ -185,30 +202,14 @@ def find_area(lat, lon):
     for feature in ALL_FEATURES:
         polygon = shape(feature["geometry"])
         if polygon.intersects(point) or polygon.covers(point) or polygon.contains(point):
-            props = feature["properties"]
-            return {
-                "name": props.get("name", "名称未設定"),
-                "base_fare": int(props.get("base_fare", 500)),
-                "base_distance_m": int(props.get("base_distance_m", 1000)),
-                "add_fare": int(props.get("add_fare", 100)),
-                "add_distance_m": int(props.get("add_distance_m", 250)),
-                "reservation_fee": int(props.get("reservation_fee", DEFAULT_RESERVATION_FEE)) # Area別の予約料金を取得
-            }
+            return parse_area_properties(feature["properties"])
 
     # 2. 境界線付近のバッファ判定
     buffered_point = point.buffer(0.001)
     for feature in ALL_FEATURES:
         polygon = shape(feature["geometry"])
         if polygon.intersects(buffered_point):
-            props = feature["properties"]
-            return {
-                "name": props.get("name", "名称未設定"),
-                "base_fare": int(props.get("base_fare", 500)),
-                "base_distance_m": int(props.get("base_distance_m", 1000)),
-                "add_fare": int(props.get("add_fare", 100)),
-                "add_distance_m": int(props.get("add_distance_m", 250)),
-                "reservation_fee": int(props.get("reservation_fee", DEFAULT_RESERVATION_FEE)) # Area別の予約料金を取得
-            }
+            return parse_area_properties(feature["properties"])
 
     return None
 
@@ -625,7 +626,6 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
             all_path_coords = []
             total_distance = 0.0
             taxi_fare = 0
-            first_segment_rule = None # 1乗車目のルールを記憶（予約料金適用のため）
             error_flag = False
             error_message = ""
             info_messages = []
@@ -707,8 +707,6 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                             break
 
                     is_first_segment = (seg_idx == 0)
-                    if is_first_segment:
-                        first_segment_rule = applied_rule
 
                     seg_fare = calculate_segment_fare(seg_dist, applied_rule, is_night, include_pickup=is_first_segment)
 
@@ -753,11 +751,12 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
 
                 final_toll_fee = api_toll_fee if api_toll_fee > 0 else manual_toll_fee
                 
-                # --- エリア別予約料金の計算 ---
+                # --- 出発地点（始点）のエリアに基づく予約料金の適用 ---
                 applied_res_fee = 0
                 if use_reservation:
-                    if first_segment_rule and "reservation_fee" in first_segment_rule:
-                        applied_res_fee = first_segment_rule["reservation_fee"]
+                    start_area = points[0].get("area")
+                    if start_area and "reservation_fee" in start_area:
+                        applied_res_fee = start_area["reservation_fee"]
                     else:
                         applied_res_fee = DEFAULT_RESERVATION_FEE
 
