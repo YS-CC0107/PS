@@ -768,6 +768,7 @@ if st.button("料金とルートを計算する", type="primary", disabled=is_di
                     "taxi_fare": taxi_fare,
                     "grand_total": grand_total,
                     "use_reservation": use_reservation,
+                    "is_night": is_night, # 深夜割増フラグを保存
                     "applied_res_fee": applied_res_fee,
                     "total_toll_fee": final_toll_fee,
                     "is_round_trip": is_round_trip,
@@ -795,6 +796,10 @@ if "calc_result" in st.session_state:
 
         has_toll = res["total_toll_fee"] > 0
         
+        # --- ラベル文言の動的制御 ---
+        fare_label = "タクシー運賃 (迎車・深夜割増込)" if res.get("is_night", False) else "タクシー運賃 (迎車込)"
+        fare_detail_label = "タクシー運賃(迎車・深夜割増込)" if res.get("is_night", False) else "タクシー運賃(迎車込)"
+
         toll_label = "高速料金のみ (往復エリア)" if res.get("is_round_trip", False) else "高速料金のみ (ETC)"
         if res.get("has_bridge_fee", False):
             toll_label += " ※橋代+910円込"
@@ -804,7 +809,7 @@ if "calc_result" in st.session_state:
             with c1:
                 st.metric("総実走行距離", f"{res['total_distance']:.2f} km")
             with c2:
-                st.metric("タクシー運賃 (迎車込)", f"{res['taxi_fare']:,} 円")
+                st.metric(fare_label, f"{res['taxi_fare']:,} 円")
             with c3:
                 st.metric(toll_label, f"{res['total_toll_fee']:,} 円")
             with c4:
@@ -814,11 +819,11 @@ if "calc_result" in st.session_state:
             with c1:
                 st.metric("総実走行距離", f"{res['total_distance']:.2f} km")
             with c2:
-                st.metric("タクシー運賃 (迎車込)", f"{res['taxi_fare']:,} 円")
+                st.metric(fare_label, f"{res['taxi_fare']:,} 円")
             with c3:
                 st.metric("支払総額 (合計)", f"{res['grand_total']:,} 円")
 
-        details = [f"タクシー運賃(迎車込): {res['taxi_fare']:,}円"]
+        details = [f"{fare_detail_label}: {res['taxi_fare']:,}円"]
         if res["use_reservation"]:
             details.append(f"予約料金: {res['applied_res_fee']:,}円")
         if has_toll:
